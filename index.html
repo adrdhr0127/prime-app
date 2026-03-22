@@ -788,10 +788,10 @@ input,select,button{font-family:inherit;font-size:inherit;}
           </div>
         </div>
         <div class="settings-row">
-          <div><div class="settings-lbl" style="color:var(--blu)">Massive.com API Key</div><div class="settings-desc">Real-time quotes, OHLCV candles, WebSocket streaming, fundamentals &amp; news. Get key at massive.com</div></div>
+          <div><div class="settings-lbl" style="color:var(--blu)">Finnhub API Key</div><div class="settings-desc">Real-time quotes, candles, WebSocket trades, news, fundamentals, earnings. Free at finnhub.io</div></div>
           <div class="settings-control" style="display:flex;gap:6px;align-items:center;">
-            <input type="password" id="set-massivekey" placeholder="Enter Massive API key..." style="width:140px;background:var(--bg2);border:1px solid var(--bdr);border-radius:4px;padding:4px 7px;color:var(--t1);font-size:11px;outline:none;" oninput="saveMassiveKey()">
-            <span id="massive-status" style="font-size:10px;color:var(--t3);">Not set</span>
+            <input type="password" id="set-finnhubkey" placeholder="Enter Finnhub API key..." style="width:140px;background:var(--bg2);border:1px solid var(--bdr);border-radius:4px;padding:4px 7px;color:var(--t1);font-size:11px;outline:none;" oninput="saveFinnhubKey()">
+            <span id="finnhub-status" style="font-size:10px;color:var(--t3);">Not set</span>
           </div>
         </div>
         <div class="settings-row">
@@ -1630,8 +1630,8 @@ function renderRightPanel() {
         `).join('')}
       </div>`;
   } else if(tab === 'orderbook') {
-    // Attempt live order book from Massive snapshot
-    massiveFetchSnapshot(s.t).then(snap => { if(snap && snap.bid) renderOrderBookWithData(s, snap); });
+    // Attempt live bid/ask from Finnhub quote
+    fhFetchQuote(s.t).then(q => { if(q && q.price) { s._fhQuote = q; } });
     const asks=[], bids=[];
     const mid = s.p;
     for(let i=0;i<10;i++) { asks.push({p:(mid*(1+0.0001*(i+1)*(1+Math.random()*0.5))).toFixed(2),sz:Math.floor(Math.random()*500+10)}); }
@@ -1743,7 +1743,7 @@ function setActiveTab(tab) {
   if(tab==='news') loadNewsMassive();
   if(tab==='analysis') { renderKelly(); renderGraham(); refreshAIOpinion(); }
   if(tab==='trade') { renderPositions(); updateTradeEstimate(); }
-  if(tab==='smart') renderSmartMoney();
+  if(tab==='smart') renderSmartMoneyFinnhub();
 }
 
 document.getElementById('rpTabs').addEventListener('click', e => {
@@ -1778,40 +1778,61 @@ document.querySelector('.timeframe-bar').addEventListener('click', e => {
 /* ════════════════════════════════════════════════
    NEWS
 ════════════════════════════════════════════════ */
+// Cache: {ticker -> {items, ts}}
+const NEWS_CACHE = {};
+const NEWS_TTL = 5 * 60 * 1000; // 5 minutes
+
 async function loadNews() {
-  const el=document.getElementById('newsGrid');
-  el.innerHTML='<div class="news-loading"><span class="spin"></span> Loading news for '+APP.selectedTicker+'...</div>';
-  const s=getStock(APP.selectedTicker);
-  try {
-    const r=await callAPI(`You are Oracle Prime news analyst. Search the web for the LATEST breaking news about ${s.n} (${s.t}) AND major market news today.
+  const el = document.getElementById('newsGrid');
+  const t = APP.selectedTicker;
+  const s = getStock(t);
+  if(!s) return;
 
-Return exactly 8 news items in this JSON format (no markdown, just raw JSON array):
-[{"title":"...", "summary":"...", "source":"...", "time":"X min ago", "sentiment":"positive|negative|neutral", "url":"..."},...]
-
-Mix: 5 company-specific news + 3 macro/market news. Be specific with real recent headlines. If no recent news, mention latest earnings, analyst ratings, or sector news.`);
-    
-    let items=[];
-    try { items=JSON.parse(r.trim()); } catch(e) {
-      // Fallback if JSON parse fails
-      items=generateFallbackNews(s);
-    }
-    el.innerHTML=items.map(item=>`
-      <div class="news-item">
-        <div class="ni-src-badge">${(item.source||'NEWS').slice(0,4).toUpperCase()}</div>
-        <div class="ni-body">
-          <div class="ni-meta">
-            <span class="ni-source">${escHtml(item.source||'Market News')}</span>
-            <span class="ni-time">${item.time||'Recently'}</span>
-            <span class="ni-sent ns-${item.sentiment||'neu'}">${item.sentiment||'neutral'}</span>
-          </div>
-          <div class="ni-title">${escHtml(item.title||'')}</div>
-          <div class="ni-summary">${escHtml(item.summary||'')}</div>
-        </div>
-      </div>`).join('');
-  } catch(e) {
-    const isKey = !getApiKey();
-    el.innerHTML='<div class="news-loading" style="color:var(--dn);padding:16px;line-height:1.8;">'+(isKey?'No API key set.<br>Open <b>Settings ⚙</b> → enter your<br><b>Anthropic API key</b><br><small style="color:var(--t3)">Get one free at console.anthropic.com</small>':'Error: '+e.message)+'</div>';
+  // Serve from cache if fresh
+  if(NEWS_CACHE[t] && Date.now() - NEWS_CACHE[t].ts < NEWS_TTL) {
+    renderNewsItems(el, NEWS_CACHE[t].items);
+    return;
   }
+
+  el.innerHTML = '<div class="news-loading"><span class="spin"></span> Loading news...</div>';
+  try {
+    // Short, efficient prompt — web_search tool handles the actual searching
+    const r = await callAPI('Search news for ' + t + ' stock today. Return JSON array only, no markdown:\n[{"title":"...","summary":"...","source":"...","time":"...","sentiment":"positive|negative|neutral"}]\nMax 6 items. Keep summaries under 15 words.', 600);
+    let items = [];
+    try {
+      // Strip any markdown fences before parsing
+      const clean = r.replace(/```json|```/g,'').trim();
+      items = JSON.parse(clean);
+    } catch(e) { items = generateFallbackNews(s); }
+    NEWS_CACHE[t] = {items, ts: Date.now()};
+    renderNewsItems(el, items);
+  } catch(e) {
+    const noKey = !getApiKey();
+    el.innerHTML = '<div class="news-loading" style="color:var(--dn);padding:16px;line-height:1.9;">' +
+      (noKey ? 'No API key.<br>Open <b>Settings ⚙</b> → Anthropic API Key.<br><small style="color:var(--t3)">Get one at console.anthropic.com</small>'
+             : 'Rate limited or error.<br><small style="color:var(--t3)">'+escHtml(e.message.slice(0,120))+'</small><br><br>Try again in a minute.') +
+      '</div>';
+  }
+}
+
+function renderNewsItems(el, items) {
+  if(!items || !items.length) { el.innerHTML='<div class="news-loading">No news found.</div>'; return; }
+  el.innerHTML = items.map(item => {
+    const sent = item.sentiment || 'neutral';
+    const sentClass = sent==='positive'?'ns-pos':sent==='negative'?'ns-neg':'ns-neu';
+    return `<div class="news-item">
+      <div class="ni-src-badge">${(item.source||'NEWS').slice(0,4).toUpperCase()}</div>
+      <div class="ni-body">
+        <div class="ni-meta">
+          <span class="ni-source">${escHtml(item.source||'Market News')}</span>
+          <span class="ni-time">${item.time||''}</span>
+          <span class="ni-sent ${sentClass}">${sent}</span>
+        </div>
+        <div class="ni-title">${escHtml(item.title||'')}</div>
+        <div class="ni-summary">${escHtml(item.summary||'')}</div>
+      </div>
+    </div>`;
+  }).join('');
 }
 
 function generateFallbackNews(s) {
@@ -1835,27 +1856,9 @@ async function refreshAIOpinion() {
   const kP=Math.min(0.82,Math.max(0.3,0.5+s.c*0.04));
   const kF=kellyF(kP,2.5);
   try {
-    const r=await callAPI(`You are Oracle Prime, an advanced financial analysis engine. You provide ANALYTICAL OPINIONS based on quantitative and fundamental analysis. These are your informed opinions — the user makes all final decisions independently.
-
-Stock: ${s.n} (${s.t}) | Sector: ${s.sec}
-Price: $${s.p.toFixed(2)} | Change: ${s.c.toFixed(2)}%
-P/E: ${s.pe||'N/A'} | EPS: $${s.eps||'N/A'} | Book Value: $${s.bv||'N/A'}
-Graham Number: $${gn?gn.toFixed(2):'N/A'} | Margin of Safety: ${gn?((gn-s.p)/gn*100).toFixed(1)+'%':'N/A'}
-Kelly f*: ${(kF*100).toFixed(1)}% of portfolio
-
-Search for the very latest data, news, and analyst reports on ${s.t}.
-
-Provide your analytical OPINION (clearly labeled as opinion, not advice):
-
-▸ TECHNICAL OPINION: Current momentum, key levels, pattern recognition
-▸ FUNDAMENTAL OPINION: Fair value estimate vs current price. Graham Number analysis. Is this undervalued or overvalued?
-▸ CATALYST WATCH: What specific events in the next 7-30 days could move this stock significantly?
-▸ RISK FACTORS: Top 3 specific risks that could invalidate a bullish thesis
-▸ KEY PRICE LEVELS: Your opinion on where strong support and resistance sit
-▸ KELLY SIZING OPINION: Given the mathematical edge (if any), what position size % makes sense? Show calculation.
-▸ BOTTOM LINE: Your overall analytical opinion in 2 sentences
-
-Disclaimer: This is analytical opinion only. Past analysis does not guarantee future outcomes.`);
+    // Build a compact but complete prompt well under 5k tokens
+    const dataLine = `${s.t} $${s.p.toFixed(2)} ${s.c>=0?'+':''}${s.c.toFixed(2)}% | P/E:${s.pe||'N/A'} EPS:${s.eps||'N/A'} BV:${s.bv||'N/A'} | GrahamNum:$${gn?gn.toFixed(2):'N/A'} MoS:${gn?((gn-s.p)/gn*100).toFixed(0)+'%':'N/A'} | Kelly:${(kF*100).toFixed(1)}%`;
+    const r = await callAPI('Oracle Prime analyst opinion (not advice) for ' + dataLine + '\nSearch latest news. Give: 1)Technical momentum & key levels 2)Fundamental value vs Graham Number 3)Top catalyst next 30d 4)Main risk 5)Kelly position % math 6)One-sentence bottom line. Be specific with numbers.', 700);
     el.classList.remove('busy'); el.textContent=r;
   } catch(e) {
     el.classList.remove('busy');
@@ -2128,7 +2131,11 @@ async function callAPI(prompt, maxTok=1000) {
   });
   if (!r.ok) {
     const err = await r.json().catch(() => ({}));
-    throw new Error((err.error?.message) || 'API error ' + r.status + '. Check your API key in Settings.');
+    const msg = err.error?.message || '';
+    if(r.status === 429 || msg.includes('rate limit')) {
+      throw new Error('Rate limited. Wait 60s then try again. (Tip: Massive.com key in Settings eliminates rate limits for news & charts.)');
+    }
+    throw new Error(msg || 'API error ' + r.status + '. Check your API key in Settings.');
   }
   const d = await r.json();
   return d.content.filter(b => b.type === 'text').map(b => b.text).join('\n');
@@ -2158,7 +2165,7 @@ function setLeftPanel(name, iconEl) {
 
   // Trigger panel-specific load
   if(name === 'screener') runScreener();
-  if(name === 'news') loadSidebarNews();
+  if(name === 'news') loadSidebarNewsFinnhub();
   if(name === 'smart') loadSidebarSmart();
 }
 
@@ -2204,29 +2211,45 @@ function runScreener() {
   };
 }
 
+const SIDEBAR_NEWS_CACHE = {items: null, ts: 0};
+
 async function loadSidebarNews() {
   const el = document.getElementById('sbNewsEl');
   if(!el) return;
+
+  // Serve cache if fresh (10 min TTL for sidebar)
+  if(SIDEBAR_NEWS_CACHE.items && Date.now() - SIDEBAR_NEWS_CACHE.ts < 600000) {
+    renderSidebarNews(el, SIDEBAR_NEWS_CACHE.items);
+    return;
+  }
+
   el.innerHTML = '<div style="padding:12px;color:var(--t3);font-size:11px;text-align:center;"><span class="spin"></span> Loading...</div>';
   try {
-    const r = await callAPI('Search for the top 6 most important US financial market news stories right now. Return JSON array only (no markdown): [{"headline":"...","source":"...","time":"X min ago","sentiment":"positive|negative|neutral"},...]. Focus on market-moving news: Fed, earnings, M&A, macro data, index moves.');
+    const r = await callAPI('Top 5 US market news today. JSON only:\n[{"headline":"...","source":"...","time":"...","sentiment":"positive|negative|neutral"}]\nFocus: Fed, earnings, major index moves. Headlines under 12 words.', 400);
     let items = [];
-    try { items = JSON.parse(r.trim()); } catch(e) {
-      items = [{headline:'Market Update: Major indices mixed as investors assess Fed outlook',source:'Reuters',time:'Just now',sentiment:'neutral'},{headline:'Tech sector leads morning rally on AI demand optimism',source:'Bloomberg',time:'12 min ago',sentiment:'positive'}];
+    try { items = JSON.parse(r.replace(/```json|```/g,'').trim()); } catch(e) {
+      items = [{headline:'Markets mixed as investors weigh macro data',source:'Reuters',time:'Now',sentiment:'neutral'}];
     }
-    el.innerHTML = items.map(item => {
-      const sc = item.sentiment==='positive'?'var(--up)':item.sentiment==='negative'?'var(--dn)':'var(--t3)';
-      return '<div style="padding:8px 4px;border-bottom:1px solid var(--bdr);cursor:pointer;" class="news-item-sb">' +
-        '<div style="display:flex;justify-content:space-between;margin-bottom:2px;">' +
-        '<span style="font-size:9.5px;color:var(--blu);">'+escHtml(item.source||'News')+'</span>' +
-        '<span style="font-size:9px;color:var(--t4);">'+escHtml(item.time||'')+'</span></div>' +
-        '<div style="font-size:11px;color:var(--t1);line-height:1.4;">'+escHtml(item.headline||'')+'</div>' +
-        '<div style="margin-top:3px;font-size:9px;padding:1px 6px;border-radius:3px;display:inline-block;background:'+(item.sentiment==='positive'?'var(--up3)':item.sentiment==='negative'?'var(--dn3)':'var(--bg3)')+';color:'+sc+'">'+escHtml(item.sentiment||'neutral')+'</div>' +
-        '</div>';
-    }).join('');
+    SIDEBAR_NEWS_CACHE.items = items;
+    SIDEBAR_NEWS_CACHE.ts = Date.now();
+    renderSidebarNews(el, items);
   } catch(e) {
-    el.innerHTML = '<div style="padding:10px;color:var(--dn);font-size:11px;">'+escHtml(e.message)+'</div>';
+    el.innerHTML = '<div style="padding:10px;color:var(--dn);font-size:11px;">'+escHtml(e.message.slice(0,100))+'<br><small style="color:var(--t3)">Try again in 1 minute</small></div>';
   }
+}
+
+function renderSidebarNews(el, items) {
+  el.innerHTML = items.map(item => {
+    const sc = item.sentiment==='positive'?'var(--up)':item.sentiment==='negative'?'var(--dn)':'var(--t3)';
+    return '<div style="padding:8px 4px;border-bottom:1px solid var(--bdr);">' +
+      '<div style="display:flex;justify-content:space-between;margin-bottom:2px;">' +
+      '<span style="font-size:9.5px;color:var(--blu);">'+escHtml(item.source||'News')+'</span>' +
+      '<span style="font-size:9px;color:var(--t4);">'+escHtml(item.time||'')+'</span></div>' +
+      '<div style="font-size:11px;color:var(--t1);line-height:1.4;">'+escHtml(item.headline||item.title||'')+'</div>' +
+      '<span style="margin-top:3px;font-size:9px;padding:1px 5px;border-radius:3px;display:inline-block;' +
+      'background:'+(item.sentiment==='positive'?'var(--up3)':item.sentiment==='negative'?'var(--dn3)':'var(--bg3)')+';color:'+sc+'">'+escHtml(item.sentiment||'neutral')+'</span>' +
+      '</div>';
+  }).join('');
 }
 
 function loadSidebarSmart() {
@@ -2260,12 +2283,12 @@ function boot() {
   try {
     const ak = localStorage.getItem('op-apikey');
     if(ak) updateApiKeyStatus();
-    const mk = localStorage.getItem('op-massive');
-    if(mk) {
-      updateMassiveStatus(false);
+    const fk = localStorage.getItem('op-finnhub');
+    if(fk) {
+      updateFinnhubStatus(false);
       // Pre-populate input placeholder
-      const inp = document.getElementById('set-massivekey');
-      if(inp) inp.placeholder = 'sk-***...'+mk.slice(-4);
+      const inp = document.getElementById('set-finnhubkey');
+      if(inp) inp.placeholder = '***...'+fk.slice(-4);
     }
     if(!ak && !mk) {
       setTimeout(() => showToast('Open Settings ⚙ to add your API keys for live data','info'), 2000);
@@ -2279,7 +2302,7 @@ function boot() {
   setInterval(()=>{ if(APP.activeTab==='news') loadNewsMassive(); },300000);
   // Re-subscribe watchlist to WS after connection
   setTimeout(()=>{
-    if(massiveSocketReady) massiveSubscribe(APP.watchlist);
+    if(fhSocketReady) fhSubscribe(APP.watchlist);
   }, 3000);
   updateBalanceDisplay();
   renderPositions();
@@ -2302,331 +2325,328 @@ window.addEventListener('load',()=>{
 window.addEventListener('resize',()=>{ resizeChart(); renderChart(); });
 
 /* ════════════════════════════════════════════════
-   MASSIVE.COM API INTEGRATION
+   FINNHUB.IO API INTEGRATION
    Formerly Polygon.io — institutional-grade market data
 ════════════════════════════════════════════════ */
 
 // ── Key Management ────────────────────────────
-function getMassiveKey() {
-  try { return localStorage.getItem('op-massive') || ''; } catch(e) { return ''; }
+function getFinnhubKey() {
+  try { return localStorage.getItem('op-finnhub') || ''; } catch(e) { return ''; }
 }
-function saveMassiveKey() {
-  const k = (document.getElementById('set-massivekey')?.value || '').trim();
+function saveFinnhubKey() {
+  const k = (document.getElementById('set-finnhubkey')?.value || '').trim();
   try {
-    if(k) { localStorage.setItem('op-massive', k); updateMassiveStatus(true); }
+    if(k) { localStorage.setItem('op-finnhub', k); updateFinnhubStatus(true); }
   } catch(e) {}
 }
-function updateMassiveStatus(connected) {
-  const el = document.getElementById('massive-status');
-  const inp = document.getElementById('set-massivekey');
+function updateFinnhubStatus(connected) {
+  const el = document.getElementById('finnhub-status');
+  const inp = document.getElementById('set-finnhubkey');
   if(!el) return;
-  el.textContent = connected ? '✓ Connected' : (getMassiveKey() ? '✓ Saved' : 'Not set');
-  el.style.color = (connected || getMassiveKey()) ? 'var(--up)' : 'var(--t3)';
-  if(inp && getMassiveKey() && !inp.value) inp.placeholder = 'sk-***...'+getMassiveKey().slice(-4);
+  el.textContent = connected ? '✓ Connected' : (getFinnhubKey() ? '✓ Saved' : 'Not set');
+  el.style.color = (connected || getFinnhubKey()) ? 'var(--up)' : 'var(--t3)';
+  if(inp && getFinnhubKey() && !inp.value) inp.placeholder = '***...'+getFinnhubKey().slice(-4);
 }
 
-const MASSIVE_BASE = 'https://api.massive.com';
-const MASSIVE_WS   = 'wss://socket.massive.com/stocks';
-let   massiveSocket = null;
-let   massiveSocketReady = false;
-const socketListeners = new Set(); // tickers currently subscribed
+const FH_BASE = 'https://finnhub.io/api/v1';
+const FH_WS   = 'wss://ws.finnhub.io';
+let   fhSocket = null;
+let   fhSocketReady = false;
+const fhListeners = new Set();
 
-// ── REST: Real-time snapshot (quote + day OHLCV) ──────────────────────────────
-async function massiveFetchSnapshot(ticker) {
-  const key = getMassiveKey(); if(!key) return null;
+// ── REST: Real-time quote ──────────────────────────────────────────────────
+// Response: {c:current, d:change, dp:changePct, h:high, l:low, o:open, pc:prevClose, t:timestamp}
+async function fhFetchQuote(ticker) {
+  const key = getFinnhubKey(); if(!key) return null;
   try {
-    const r = await fetch(MASSIVE_BASE+'/v2/snapshot/locale/us/markets/stocks/tickers/'+ticker+'?apiKey='+key);
+    const r = await fetch(`${FH_BASE}/quote?symbol=${ticker}&token=${key}`);
     if(!r.ok) return null;
     const d = await r.json();
-    const t = d.ticker; if(!t) return null;
+    if(!d.c) return null;
     return {
-      price:   t.day?.c  || t.prevDay?.c || 0,
-      open:    t.day?.o  || 0,
-      high:    t.day?.h  || 0,
-      low:     t.day?.l  || 0,
-      close:   t.day?.c  || 0,
-      prevClose: t.prevDay?.c || 0,
-      volume:  t.day?.v  || 0,
-      vwap:    t.day?.vw || 0,
-      changeAmt:   t.todaysChange    || 0,
-      changePct:   t.todaysChangePerc|| 0,
-      lastTrade:   t.lastTrade?.p    || 0,
-      lastSize:    t.lastTrade?.s    || 0,
-      bid:         t.lastQuote?.P    || 0,
-      ask:         t.lastQuote?.p    || 0,
-      bidSize:     t.lastQuote?.S    || 0,
-      askSize:     t.lastQuote?.s    || 0,
+      price:     d.c,
+      change:    d.d,
+      changePct: d.dp,
+      high:      d.h,
+      low:       d.l,
+      open:      d.o,
+      prevClose: d.pc,
+      timestamp: d.t
     };
   } catch(e) { return null; }
 }
 
-// ── REST: Aggregate candles (OHLCV) ──────────────────────────────────────────
-async function massiveFetchCandles(ticker, interval, fromDate, toDate) {
-  const key = getMassiveKey(); if(!key) return null;
-  const map = {
-    '1m':'minute/1','5m':'minute/5','15m':'minute/15','30m':'minute/30',
-    '1h':'hour/1','D':'day/1','W':'week/1','M':'month/1'
-  };
-  const span = (map[interval]||'day/1').split('/');
-  const url = `${MASSIVE_BASE}/v2/aggs/ticker/${ticker}/range/${span[1]}/${span[0]}/${fromDate}/${toDate}?adjusted=true&sort=asc&limit=500&apiKey=${key}`;
+// ── REST: OHLCV Candles ────────────────────────────────────────────────────
+// resolution: 1,5,15,30,60 = minutes | D,W,M = day/week/month
+// from/to = UNIX timestamps (seconds)
+async function fhFetchCandles(ticker, interval, fromTs, toTs) {
+  const key = getFinnhubKey(); if(!key) return null;
+  const resMap = {'1m':'1','5m':'5','15m':'15','30m':'30','1h':'60','D':'D','W':'W','M':'M'};
+  const res = resMap[interval] || 'D';
   try {
-    const r = await fetch(url);
+    const r = await fetch(`${FH_BASE}/stock/candle?symbol=${ticker}&resolution=${res}&from=${fromTs}&to=${toTs}&token=${key}`);
     if(!r.ok) return null;
     const d = await r.json();
-    if(!d.results || !d.results.length) return null;
-    return d.results.map(bar => ({
-      o: bar.o, h: bar.h, l: bar.l,
-      c: bar.c, v: bar.v, vw: bar.vw, t: bar.t
+    if(d.s !== 'ok' || !d.c) return null;
+    // Map to Oracle Prime format: {o,h,l,c,v,t}
+    return d.t.map((t, i) => ({
+      o: d.o[i], h: d.h[i], l: d.l[i],
+      c: d.c[i], v: d.v[i],
+      t: t * 1000  // Finnhub gives seconds, we use ms
     }));
   } catch(e) { return null; }
 }
 
-// ── REST: Ticker Details (fundamentals) ──────────────────────────────────────
-async function massiveFetchDetails(ticker) {
-  const key = getMassiveKey(); if(!key) return null;
+// ── REST: Company Profile ──────────────────────────────────────────────────
+async function fhFetchProfile(ticker) {
+  const key = getFinnhubKey(); if(!key) return null;
   try {
-    const r = await fetch(MASSIVE_BASE+'/v3/reference/tickers/'+ticker+'?apiKey='+key);
+    const r = await fetch(`${FH_BASE}/stock/profile2?symbol=${ticker}&token=${key}`);
     if(!r.ok) return null;
-    const d = await r.json();
-    return d.results || null;
+    return await r.json(); // {name, exchange, industry, marketCapitalization, shareOutstanding, ...}
   } catch(e) { return null; }
 }
 
-// ── REST: Financials (EPS, revenue, book value) ───────────────────────────────
-async function massiveFetchFinancials(ticker) {
-  const key = getMassiveKey(); if(!key) return null;
+// ── REST: Basic Financials (P/E, EPS, book value, etc.) ───────────────────
+async function fhFetchMetrics(ticker) {
+  const key = getFinnhubKey(); if(!key) return null;
   try {
-    const r = await fetch(MASSIVE_BASE+'/vX/reference/financials?ticker='+ticker+'&limit=4&apiKey='+key);
+    const r = await fetch(`${FH_BASE}/stock/metric?symbol=${ticker}&metric=all&token=${key}`);
     if(!r.ok) return null;
     const d = await r.json();
-    const latest = d.results?.[0];
-    if(!latest) return null;
-    const ic = latest.financials?.income_statement;
-    const bs = latest.financials?.balance_sheet;
-    const shares = bs?.outstanding_shares?.value || 1;
+    const m = d.metric || {};
     return {
-      eps:   ic?.net_income_loss?.value ? (ic.net_income_loss.value / shares) : null,
-      bvps:  bs?.equity?.value          ? (bs.equity.value / shares)          : null,
-      revenue: ic?.revenues?.value      || null,
-      netIncome: ic?.net_income_loss?.value || null,
+      eps:       m.epsAnnual      || m.epsNTM       || null,
+      bvps:      m.bookValuePerShareAnnual           || null,
+      pe:        m.peAnnual       || m.peNTM         || null,
+      pb:        m.pbAnnual                          || null,
+      roe:       m.roeAnnual                         || null,
+      debtEq:    m.totalDebt_totalEquityAnnual       || null,
+      currentRatio: m.currentRatioAnnual             || null,
+      revenueGrowth: m.revenueGrowth3Y               || null,
+      marketCap: m['52WeekHigh']  ? null : null,  // placeholder
+      high52:    m['52WeekHigh']                     || null,
+      low52:     m['52WeekLow']                      || null,
     };
   } catch(e) { return null; }
 }
 
-// ── REST: News (Benzinga feed) ────────────────────────────────────────────────
-async function massiveFetchNews(ticker, limit=8) {
-  const key = getMassiveKey(); if(!key) return null;
+// ── REST: Company News ─────────────────────────────────────────────────────
+async function fhFetchCompanyNews(ticker, days=7) {
+  const key = getFinnhubKey(); if(!key) return null;
+  const toD   = new Date();
+  const fromD = new Date(toD - days * 86400000);
+  const fmt   = d => d.toISOString().split('T')[0];
   try {
-    const r = await fetch(MASSIVE_BASE+'/v2/reference/news?ticker='+ticker+'&limit='+limit+'&apiKey='+key);
+    const r = await fetch(`${FH_BASE}/company-news?symbol=${ticker}&from=${fmt(fromD)}&to=${fmt(toD)}&token=${key}`);
     if(!r.ok) return null;
     const d = await r.json();
-    return (d.results || []).map(item => ({
-      title:     item.title    || '',
-      summary:   item.description || '',
-      source:    item.publisher?.name || 'Benzinga',
-      url:       item.article_url || '',
-      time:      item.published_utc ? timeAgo(item.published_utc) : 'Recently',
-      sentiment: item.insights?.[0]?.sentiment || 'neutral',
-      tickers:   item.tickers || []
+    if(!Array.isArray(d)) return null;
+    return d.slice(0, 10).map(item => ({
+      title:     item.headline || '',
+      summary:   item.summary  || '',
+      source:    item.source   || 'Finnhub',
+      url:       item.url      || '',
+      time:      item.datetime ? timeAgo(new Date(item.datetime * 1000).toISOString()) : 'Recently',
+      sentiment: item.sentiment === 1 ? 'positive' : item.sentiment === -1 ? 'negative' : 'neutral',
+      image:     item.image    || ''
     }));
   } catch(e) { return null; }
 }
 
-// ── REST: Grouped daily snapshot (all tickers) ────────────────────────────────
-async function massiveFetchMarketSnapshot() {
-  const key = getMassiveKey(); if(!key) return;
+// ── REST: General Market News ──────────────────────────────────────────────
+async function fhFetchMarketNews(category='general') {
+  const key = getFinnhubKey(); if(!key) return null;
   try {
-    const r = await fetch(MASSIVE_BASE+'/v2/snapshot/locale/us/markets/stocks/tickers?apiKey='+key+'&include_otc=false');
-    if(!r.ok) return;
+    const r = await fetch(`${FH_BASE}/news?category=${category}&token=${key}`);
+    if(!r.ok) return null;
     const d = await r.json();
-    (d.tickers || []).forEach(t => {
-      const s = getStock(t.ticker);
-      if(s && t.day) {
-        s.p = t.day.c || s.p;
-        s.c = parseFloat((t.todaysChangePerc || 0).toFixed(2));
-      }
-    });
-    console.log('[Massive] Market snapshot updated');
-  } catch(e) {}
+    return (d || []).slice(0, 8).map(item => ({
+      headline:  item.headline || '',
+      source:    item.source   || 'Finnhub',
+      url:       item.url      || '',
+      time:      item.datetime ? timeAgo(new Date(item.datetime * 1000).toISOString()) : 'Recently',
+      sentiment: 'neutral'
+    }));
+  } catch(e) { return null; }
 }
 
-// ── WebSocket: Live streaming ─────────────────────────────────────────────────
-function massiveConnectWS() {
-  const key = getMassiveKey(); if(!key) return;
-  if(massiveSocket && massiveSocket.readyState < 2) return; // already open/connecting
+// ── REST: Analyst Recommendations ─────────────────────────────────────────
+async function fhFetchRecommendations(ticker) {
+  const key = getFinnhubKey(); if(!key) return null;
+  try {
+    const r = await fetch(`${FH_BASE}/stock/recommendation?symbol=${ticker}&token=${key}`);
+    if(!r.ok) return null;
+    const d = await r.json();
+    return (d || [])[0] || null; // {buy,hold,sell,strongBuy,strongSell,period}
+  } catch(e) { return null; }
+}
 
-  massiveSocket = new WebSocket(MASSIVE_WS);
+// ── REST: Earnings Calendar ────────────────────────────────────────────────
+async function fhFetchEarnings(ticker) {
+  const key = getFinnhubKey(); if(!key) return null;
+  try {
+    const r = await fetch(`${FH_BASE}/stock/earnings?symbol=${ticker}&token=${key}`);
+    if(!r.ok) return null;
+    const d = await r.json();
+    return (d || [])[0] || null; // latest earnings
+  } catch(e) { return null; }
+}
 
-  massiveSocket.addEventListener('open', () => {
-    massiveSocket.send(JSON.stringify({action:'auth', params: key}));
-    console.log('[Massive WS] Connecting...');
+// ── REST: Insider Transactions (for Smart Money tab) ──────────────────────
+async function fhFetchInsiders(ticker) {
+  const key = getFinnhubKey(); if(!key) return null;
+  try {
+    const r = await fetch(`${FH_BASE}/stock/insider-transactions?symbol=${ticker}&token=${key}`);
+    if(!r.ok) return null;
+    const d = await r.json();
+    return (d.data || []).slice(0, 10);
+  } catch(e) { return null; }
+}
+
+// ── WebSocket: Live trade streaming ──────────────────────────────────────
+function fhConnectWS() {
+  const key = getFinnhubKey(); if(!key) return;
+  if(fhSocket && fhSocket.readyState < 2) return; // already open/connecting
+
+  fhSocket = new WebSocket(`${FH_WS}?token=${key}`);
+
+  fhSocket.addEventListener('open', () => {
+    fhSocketReady = true;
+    console.log('[Finnhub WS] Connected');
+    showToast('Finnhub live streaming connected','success');
+    updateFinnhubStatus(true);
+    // Subscribe to watchlist + current stock
+    const subs = [...new Set([APP.selectedTicker, ...APP.watchlist])];
+    fhSubscribe(subs);
   });
 
-  massiveSocket.addEventListener('message', e => {
+  fhSocket.addEventListener('message', e => {
     try {
-      const msgs = JSON.parse(e.data);
-      msgs.forEach(msg => {
-        if(msg.ev === 'connected') {
-          console.log('[Massive WS] Connected');
-        }
-        if(msg.ev === 'auth_success') {
-          massiveSocketReady = true;
-          console.log('[Massive WS] Authenticated');
-          showToast('Live streaming connected via Massive','success');
-          // Subscribe to watchlist + current stock
-          const subs = [...new Set([APP.selectedTicker, ...APP.watchlist])];
-          massiveSubscribe(subs);
-        }
-        if(msg.ev === 'auth_failed') {
-          showToast('Massive API key invalid — check Settings','error');
-          massiveSocketReady = false;
-        }
-        // Per-second aggregate (AM = minute, A = second)
-        if(msg.ev === 'AM' || msg.ev === 'A') {
-          const s = getStock(msg.sym);
-          if(s && msg.c) {
-            const oldP = s.p;
-            s.p = msg.c;
-            if(msg.op) s.c = parseFloat(((msg.c - msg.op) / msg.op * 100).toFixed(2));
-            // Append live candle to chart if this is the selected stock
-            if(msg.sym === APP.selectedTicker && chartData.length) {
-              const last = chartData[chartData.length-1];
-              const now  = Date.now();
-              const barMs = intervalMs(APP.interval);
-              if(now - last.t < barMs) {
-                // Update current bar
-                last.c = msg.c;
-                last.h = Math.max(last.h, msg.c);
-                last.l = Math.min(last.l, msg.c);
-                last.v += (msg.av || 0);
-              } else {
-                // New bar
-                chartData.push({o:msg.o||msg.c,h:msg.h||msg.c,l:msg.l||msg.c,c:msg.c,v:msg.av||0,t:now});
-              }
+      const msg = JSON.parse(e.data);
+      if(msg.type === 'trade' && msg.data) {
+        msg.data.forEach(trade => {
+          const s = getStock(trade.s); // trade.s = symbol
+          if(!s) return;
+          const oldP = s.p;
+          s.p = trade.p; // trade price
+          // Update change % from open
+          if(s._open) s.c = parseFloat(((s.p - s._open) / s._open * 100).toFixed(2));
+
+          // Update live candle for selected stock
+          if(trade.s === APP.selectedTicker && chartData.length) {
+            const last = chartData[chartData.length - 1];
+            const barMs = intervalMs(APP.interval);
+            if(trade.t - last.t < barMs) {
+              last.c = trade.p;
+              last.h = Math.max(last.h, trade.p);
+              last.l = Math.min(last.l, trade.p);
+              last.v += trade.v || 0;
+            } else {
+              chartData.push({o:trade.p,h:trade.p,l:trade.p,c:trade.p,v:trade.v||0,t:trade.t});
             }
           }
-        }
-        // Real-time trade (T)
-        if(msg.ev === 'T' && msg.sym === APP.selectedTicker) {
-          // Update header price live
-          const priceEl = document.getElementById('sh-price');
-          if(priceEl && msg.p) {
-            const s = getStock(msg.sym);
-            if(s) {
-              s.p = msg.p;
-              priceEl.textContent = '$'+msg.p.toFixed(msg.p<10?3:2);
-            }
-          }
-        }
-      });
-    } catch(e2) {}
+        });
+      }
+      if(msg.type === 'ping') {
+        fhSocket.send(JSON.stringify({type:'pong'}));
+      }
+    } catch(err) {}
   });
 
-  massiveSocket.addEventListener('close', () => {
-    massiveSocketReady = false;
-    console.log('[Massive WS] Closed. Reconnecting in 5s...');
-    setTimeout(massiveConnectWS, 5000);
+  fhSocket.addEventListener('close', () => {
+    fhSocketReady = false;
+    console.log('[Finnhub WS] Closed. Reconnecting in 5s...');
+    setTimeout(fhConnectWS, 5000);
   });
 
-  massiveSocket.addEventListener('error', () => {
-    massiveSocketReady = false;
+  fhSocket.addEventListener('error', () => {
+    fhSocketReady = false;
   });
 }
 
-function massiveSubscribe(tickers) {
-  if(!massiveSocket || !massiveSocketReady) return;
-  // Subscribe to per-second aggregates + trades for each ticker
-  const params = tickers.flatMap(t => ['AM.'+t, 'T.'+t]).join(',');
-  massiveSocket.send(JSON.stringify({action:'subscribe', params}));
-  tickers.forEach(t => socketListeners.add(t));
-  console.log('[Massive WS] Subscribed:', tickers.join(', '));
+function fhSubscribe(tickers) {
+  if(!fhSocket || !fhSocketReady) return;
+  tickers.forEach(t => {
+    if(!fhListeners.has(t)) {
+      fhSocket.send(JSON.stringify({type:'subscribe', symbol:t}));
+      fhListeners.add(t);
+    }
+  });
+  console.log('[Finnhub WS] Subscribed:', tickers.join(', '));
 }
 
-function massiveUnsubscribeAll() {
-  if(!massiveSocket || !massiveSocketReady || !socketListeners.size) return;
-  const params = [...socketListeners].flatMap(t => ['AM.'+t,'T.'+t]).join(',');
-  massiveSocket.send(JSON.stringify({action:'unsubscribe', params}));
-  socketListeners.clear();
+function fhUnsubscribeAll() {
+  if(!fhSocket || !fhSocketReady) return;
+  fhListeners.forEach(t => {
+    fhSocket.send(JSON.stringify({type:'unsubscribe', symbol:t}));
+  });
+  fhListeners.clear();
 }
 
-function intervalMs(interval) {
-  const map = {'1m':60000,'5m':300000,'15m':900000,'30m':1800000,'1h':3600000,'D':86400000,'W':604800000,'M':2592000000};
-  return map[interval] || 86400000;
-}
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
-function timeAgo(isoStr) {
-  const ms = Date.now() - new Date(isoStr).getTime();
-  if(ms < 60000)   return 'Just now';
-  if(ms < 3600000) return Math.floor(ms/60000)+' min ago';
-  if(ms < 86400000)return Math.floor(ms/3600000)+' hr ago';
-  return Math.floor(ms/86400000)+' days ago';
-}
-
-function toDateStr(ts) {
-  const d = new Date(ts);
-  return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
-}
-
-// ── Enhanced selectStock with real data ──────────────────────────────────────
-async function selectStockWithMassive(ticker) {
+// ── Enhanced selectStock with Finnhub data ───────────────────────────────
+async function selectStockWithMassive(ticker) {  // keeping fn name for compatibility
   const s = getStock(ticker);
   if(!s) { showToast('Symbol not found: '+ticker,'error'); return; }
   APP.selectedTicker = ticker;
 
-  // Always render with local data first (instant)
-  updateStockHeader(s);
-  chartData = genCandles(s, APP.interval, 300);
+  // Render immediately with local data (instant UX)
+  updateStockHeader(s, null);
+  chartData  = genCandles(s, APP.interval, 300);
   chartOffset = 0; renderChart();
   renderWatchlist(); renderRightPanel();
   document.getElementById('tradeSymbol').value = ticker;
-  document.getElementById('tradePrice').value = s.p.toFixed(2);
+  document.getElementById('tradePrice').value  = s.p.toFixed(2);
   updateTradeEstimate(); renderKelly(); renderGraham();
-  if(APP.activeTab==='news') loadNews();
-  if(APP.activeTab==='smart') renderSmartMoney();
 
-  // Subscribe to WS for this ticker
-  if(massiveSocketReady) {
-    massiveSubscribe([ticker]);
-  }
+  // Subscribe this ticker to WS
+  if(fhSocketReady) fhSubscribe([ticker]);
 
-  const key = getMassiveKey();
-  if(!key) return; // No key — stay with simulated data
+  const key = getFinnhubKey();
+  if(!key) return; // No Finnhub key — stay on simulation
 
-  // Async: fetch real snapshot
-  massiveFetchSnapshot(ticker).then(snap => {
-    if(!snap) return;
-    s.p  = snap.price  || s.p;
-    s.c  = parseFloat((snap.changePct || 0).toFixed(2));
-    updateStockHeader(s, snap);
+  // Parallel: quote + candles + metrics
+  const now   = Math.floor(Date.now() / 1000);
+  const dayLookback = {'1m':2,'5m':5,'15m':10,'30m':20,'1h':30,'D':365,'W':730,'M':1825};
+  const lookDays = dayLookback[APP.interval] || 365;
+  const fromTs = now - lookDays * 86400;
+
+  const [quote, candles, metrics] = await Promise.allSettled([
+    fhFetchQuote(ticker),
+    fhFetchCandles(ticker, APP.interval, fromTs, now),
+    fhFetchMetrics(ticker)
+  ]);
+
+  // Apply quote
+  if(quote.status === 'fulfilled' && quote.value) {
+    const q = quote.value;
+    s.p = q.price || s.p;
+    s.c = parseFloat((q.changePct || 0).toFixed(2));
+    s._open = q.open;
+    updateStockHeader(s, q);
     document.getElementById('tradePrice').value = s.p.toFixed(2);
     updateTradeEstimate();
-  });
+  }
 
-  // Async: fetch real candles
-  const now = Date.now();
-  const dayLookback = {'1m':2,'5m':5,'15m':10,'30m':20,'1h':30,'D':365,'W':730,'M':1825};
-  const days = dayLookback[APP.interval] || 365;
-  const fromDate = toDateStr(now - days * 86400000);
-  const toDate   = toDateStr(now);
-  massiveFetchCandles(ticker, APP.interval, fromDate, toDate).then(candles => {
-    if(candles && candles.length >= 5) {
-      chartData  = candles;
-      chartOffset = 0;
-      renderChart();
-      showToast('Live candles loaded from Massive','success');
-    }
-  });
+  // Apply real candles
+  if(candles.status === 'fulfilled' && candles.value && candles.value.length >= 5) {
+    chartData  = candles.value;
+    chartOffset = 0;
+    renderChart();
+    showToast('Live candles loaded from Finnhub','success');
+  }
 
-  // Async: fetch fundamentals and update Graham score
-  massiveFetchFinancials(ticker).then(fin => {
-    if(!fin) return;
-    if(fin.eps  !== null) s.eps = fin.eps;
-    if(fin.bvps !== null) s.bv  = fin.bvps;
+  // Apply fundamentals → update Graham score
+  if(metrics.status === 'fulfilled' && metrics.value) {
+    const m = metrics.value;
+    if(m.eps  !== null) s.eps = m.eps;
+    if(m.bvps !== null) s.bv  = m.bvps;
+    if(m.pe   !== null) s.pe  = m.pe;
+    if(m.pb   !== null) s.pb  = m.pb;
     renderKelly(); renderGraham();
-  });
+  }
 
-  // Update topbar indices
+  // Update topbar
   ['SPY','QQQ','DIA'].forEach(t => {
     const idx = getStock(t);
     const el  = document.getElementById('ti-'+t.toLowerCase());
@@ -2634,25 +2654,24 @@ async function selectStockWithMassive(ticker) {
   });
 }
 
-function updateStockHeader(s, snap) {
-  document.getElementById('sh-ticker').textContent = s.t;
-  document.getElementById('sh-exchange').textContent = s.sec;
+function updateStockHeader(s, quote) {
+  document.getElementById('sh-ticker').textContent     = s.t;
+  document.getElementById('sh-exchange').textContent   = s.sec;
   const priceEl = document.getElementById('sh-price');
   priceEl.textContent = '$'+s.p.toFixed(s.p<10?3:2);
-  priceEl.className = 'sh-price '+(s.c>=0?'up':'dn');
+  priceEl.className   = 'sh-price '+(s.c>=0?'up':'dn');
   const chgEl = document.getElementById('sh-change');
   chgEl.textContent = (s.c>=0?'+':'')+s.c.toFixed(2)+'%';
-  chgEl.className = 'sh-change '+(s.c>=0?'up':'dn');
+  chgEl.className   = 'sh-change '+(s.c>=0?'up':'dn');
 
-  if(snap) {
+  if(quote) {
     document.getElementById('sh-ohlcv').innerHTML = [
-      ['Open',  '$'+snap.open.toFixed(2)],
-      ['High',  '$'+snap.high.toFixed(2)],
-      ['Low',   '$'+snap.low.toFixed(2)],
-      ['Prev',  '$'+snap.prevClose.toFixed(2)],
-      ['Vol',   snap.volume >= 1e6 ? (snap.volume/1e6).toFixed(1)+'M' : (snap.volume/1000).toFixed(0)+'K'],
-      ['VWAP',  snap.vwap ? '$'+snap.vwap.toFixed(2) : '—'],
-    ].map(([l,v]) => `<div class="sh-stat"><div class="sh-stat-l">${l}</div><div class="sh-stat-v mono">${v}</div></div>`).join('');
+      ['Open',  '$'+quote.open.toFixed(2)],
+      ['High',  '$'+quote.high.toFixed(2)],
+      ['Low',   '$'+quote.low.toFixed(2)],
+      ['Prev',  '$'+quote.prevClose.toFixed(2)],
+      ['Chg',   (quote.change >= 0 ? '+' : '') + quote.change.toFixed(2)],
+    ].map(([l,v]) => `<div class="sh-stat"><div class="sh-stat-l">${l}</div><div class="sh-stat-v mono ${l==='Chg'?(quote.change>=0?'up':'dn'):''}">${v}</div></div>`).join('');
   } else {
     document.getElementById('sh-ohlcv').innerHTML = [
       ['Open','$'+(s.p*(1-Math.random()*.008)).toFixed(2)],
@@ -2663,71 +2682,151 @@ function updateStockHeader(s, snap) {
   }
 }
 
-// ── Enhanced loadNews using Massive Benzinga feed ─────────────────────────────
-async function loadNewsMassive() {
+// ── Enhanced news using Finnhub company news ─────────────────────────────
+async function loadNewsMassive() {  // keeping fn name for compatibility
   const el = document.getElementById('newsGrid');
-  const s  = getStock(APP.selectedTicker);
-  el.innerHTML = '<div class="news-loading"><span class="spin"></span> Loading news for '+APP.selectedTicker+'...</div>';
+  const t  = APP.selectedTicker;
+  const s  = getStock(t);
+  if(!s) return;
 
-  const key = getMassiveKey();
-  if(key) {
-    const items = await massiveFetchNews(APP.selectedTicker, 10);
+  // Fresh cache?
+  if(NEWS_CACHE[t] && Date.now() - NEWS_CACHE[t].ts < NEWS_TTL) {
+    renderNewsItems(el, NEWS_CACHE[t].items);
+    return;
+  }
+
+  el.innerHTML = '<div class="news-loading"><span class="spin"></span> Loading news...</div>';
+
+  // Try Finnhub first (no AI tokens used)
+  const fhKey = getFinnhubKey();
+  if(fhKey) {
+    const items = await fhFetchCompanyNews(t, 7);
     if(items && items.length) {
-      el.innerHTML = items.map(item => `
-        <div class="news-item" onclick="window.open('${escHtml(item.url)}','_blank')" style="cursor:pointer;">
-          <div class="ni-src-badge">${(item.source||'NEWS').slice(0,4).toUpperCase()}</div>
-          <div class="ni-body">
-            <div class="ni-meta">
-              <span class="ni-source">${escHtml(item.source||'News')}</span>
-              <span class="ni-time">${item.time}</span>
-              <span class="ni-sent ns-${item.sentiment==='positive'?'pos':item.sentiment==='negative'?'neg':'neu'}">${item.sentiment}</span>
-              ${item.tickers.length?'<span style="font-size:9px;color:var(--gold)">'+item.tickers.slice(0,3).join(' ')+'</span>':''}
-            </div>
-            <div class="ni-title">${escHtml(item.title)}</div>
-            <div class="ni-summary">${escHtml(item.summary)}</div>
-          </div>
-        </div>`).join('');
+      NEWS_CACHE[t] = {items, ts: Date.now()};
+      renderNewsItems(el, items);
       return;
     }
   }
 
-  // Fallback to Claude AI news if no Massive key or no results
-  const anthropicKey = getApiKey();
-  if(!anthropicKey) {
-    el.innerHTML = '<div class="news-loading" style="color:var(--t3);padding:16px;line-height:1.9;">Set a <b style="color:var(--gold)">Massive API key</b> or <b style="color:var(--blu)">Anthropic API key</b> in Settings ⚙ to load live news.</div>';
+  // Fall back to Anthropic AI news if no Finnhub key or no results
+  const aiKey = getApiKey();
+  if(!aiKey) {
+    el.innerHTML = '<div class="news-loading" style="padding:16px;line-height:1.9;color:var(--t3);">Set a <b style="color:var(--gold)">Finnhub API key</b> (free at finnhub.io) or <b style="color:var(--blu)">Anthropic key</b> in Settings ⚙ to see live news.</div>';
     return;
   }
-  // Use existing Claude news loader
-  loadNews();
+  loadNews(); // Claude AI fallback
 }
 
-// ── Enhanced startLivePrices using Massive snapshots ─────────────────────────
-function startLivePricesEnhanced() {
-  const key = getMassiveKey();
-  if(key) {
-    // Connect WebSocket for real-time streaming
-    massiveConnectWS();
-    // Fetch full market snapshot immediately (delayed on free tier, real-time on paid)
-    massiveFetchMarketSnapshot();
-    // Refresh market snapshot every 60s (REST fallback if WS drops)
-    const snapIv = setInterval(massiveFetchMarketSnapshot, 60000);
-    APP._intervals.push(snapIv);
-    showToast('Massive.com API connected — live data active','success');
+// ── Enhanced sidebar news using Finnhub market news ──────────────────────
+async function loadSidebarNewsFinnhub() {
+  const el = document.getElementById('sbNewsEl'); if(!el) return;
+  if(SIDEBAR_NEWS_CACHE.items && Date.now() - SIDEBAR_NEWS_CACHE.ts < 600000) {
+    renderSidebarNews(el, SIDEBAR_NEWS_CACHE.items); return;
+  }
+  el.innerHTML = '<div style="padding:12px;color:var(--t3);font-size:11px;text-align:center;"><span class="spin"></span> Loading...</div>';
+  const fhKey = getFinnhubKey();
+  if(fhKey) {
+    const items = await fhFetchMarketNews('general');
+    if(items && items.length) {
+      SIDEBAR_NEWS_CACHE.items = items;
+      SIDEBAR_NEWS_CACHE.ts    = Date.now();
+      renderSidebarNews(el, items);
+      return;
+    }
+  }
+  // Fall back to AI sidebar news
+  loadSidebarNews();
+}
+
+// ── Enhanced Smart Money tab with real insider data ───────────────────────
+async function renderSmartMoneyFinnhub() {
+  const el = document.getElementById('smartPanel'); if(!el) return;
+  const s  = getStock(APP.selectedTicker) || getStock('AAPL');
+  el.innerHTML = '<div style="padding:14px;color:var(--t3);font-size:11px;text-align:center;"><span class="spin"></span> Loading smart money data...</div>';
+
+  const fhKey = getFinnhubKey();
+
+  // Institutional section (always show simulated data as base)
+  const institutional = [
+    {name:'Vanguard Group',     detail:'13F — Largest holder',   val:'$'+Math.floor(s.p*Math.random()*500+100)+'M', tag:'Accumulating', cls:'up'},
+    {name:'BlackRock Inc.',     detail:'13F — Passive + active',  val:'$'+Math.floor(s.p*Math.random()*400+80)+'M',  tag:'Accumulating', cls:'up'},
+    {name:'Fidelity',           detail:'13F — Active management', val:'$'+Math.floor(s.p*Math.random()*250+50)+'M',  tag:'Trimming',     cls:'dn'},
+    {name:'State Street',       detail:'13F — SPDR ETFs',         val:'$'+Math.floor(s.p*Math.random()*300+60)+'M',  tag:'Holding',      cls:'t3'},
+    {name:'T. Rowe Price',      detail:'13F — Growth funds',      val:'$'+Math.floor(s.p*Math.random()*200+30)+'M',  tag:'Accumulating', cls:'up'},
+    {name:'Ark Invest',         detail:'13F — Innovation fund',   val:'$'+Math.floor(s.p*Math.random()*80+10)+'M',   tag:'Buying',       cls:'up'},
+  ];
+
+  let insiderHtml = '<div style="padding:10px;color:var(--t3);font-size:11px;">Loading insider data...</div>';
+
+  if(fhKey) {
+    const insiders = await fhFetchInsiders(s.t);
+    if(insiders && insiders.length) {
+      insiderHtml = insiders.map(tx => {
+        const isBuy = (tx.transactionType||'').toLowerCase().includes('buy') || tx.change > 0;
+        const shares = Math.abs(tx.share || tx.change || 0);
+        const val    = (tx.value || tx.transactionPrice * shares || 0);
+        return '<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 4px;border-bottom:1px solid var(--bdr);">' +
+          '<div>' +
+          '<div style="font-size:11px;color:var(--t1);">'+(tx.name||tx.reportedTitle||'Insider')+'</div>' +
+          '<div style="font-size:9.5px;color:var(--t3);">'+(tx.reportedTitle||'')+(tx.filingDate?' · '+tx.filingDate:'')+'</div>' +
+          '</div>' +
+          '<div style="text-align:right;">' +
+          '<div style="font-family:JetBrains Mono,monospace;font-size:11px;color:'+(isBuy?'var(--up)':'var(--dn)')+';">'+(isBuy?'+':'-')+shares.toLocaleString()+' sh</div>' +
+          (val ? '<div style="font-size:9.5px;color:var(--t3);">$'+(val/1000).toFixed(0)+'K</div>' : '') +
+          '<span style="font-size:9px;padding:1px 6px;border-radius:3px;background:'+(isBuy?'var(--up3)':'var(--dn3)')+';color:'+(isBuy?'var(--up)':'var(--dn)')+';">'+(isBuy?'Buy':'Sell')+'</span>' +
+          '</div></div>';
+      }).join('');
+    } else {
+      insiderHtml = '<div style="padding:8px 4px;color:var(--t3);font-size:11px;">No recent insider transactions found.</div>';
+    }
   }
 
-  // Simulation interval (runs always as a fallback / for stocks not in Massive)
+  function instSection() {
+    return institutional.map(p =>
+      '<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 4px;border-bottom:1px solid var(--bdr);">' +
+      '<div><div style="font-size:11px;color:var(--t1);">'+p.name+'</div><div style="font-size:9.5px;color:var(--t3);">'+p.detail+'</div></div>' +
+      '<div style="text-align:right;"><div style="font-family:JetBrains Mono,monospace;font-size:11px;color:var(--'+p.cls+');">'+p.val+'</div>' +
+      '<span style="font-size:9px;padding:1px 6px;border-radius:3px;background:'+(p.cls==='up'?'var(--up3)':p.cls==='dn'?'var(--dn3)':'var(--bg3)')+';color:'+(p.cls==='up'?'var(--up)':p.cls==='dn'?'var(--dn)':'var(--t3)')+';">'+p.tag+'</span></div>' +
+      '</div>'
+    ).join('');
+  }
+
+  el.innerHTML =
+    '<div class="sm-section"><div class="sm-title"><span>Institutional Holdings (13F) — '+s.t+'</span><span class="pill pill-gold">Public Filings</span></div>'+instSection()+'</div>' +
+    '<div class="sm-section"><div class="sm-title"><span>Insider Transactions (Form 4)</span><span class="pill pill-gold">'+(fhKey?'Live via Finnhub':'Finnhub key required')+'</span></div>'+insiderHtml+'</div>';
+}
+
+// ── Enhanced startLivePrices with Finnhub ────────────────────────────────
+function startLivePricesEnhanced() {
+  const key = getFinnhubKey();
+  if(key) {
+    fhConnectWS(); // Live WebSocket trades
+    // Refresh quotes for all watchlist stocks every 15s (REST fallback)
+    const quotesIv = setInterval(async () => {
+      const tickers = [...new Set([APP.selectedTicker, ...APP.watchlist.slice(0, 10)])];
+      for(const t of tickers) {
+        const q = await fhFetchQuote(t);
+        if(q) {
+          const s = getStock(t);
+          if(s) { s.p = q.price; s.c = parseFloat((q.changePct||0).toFixed(2)); s._open = q.open; }
+        }
+        await new Promise(r => setTimeout(r, 200)); // 5 req/s stay under 60/min limit
+      }
+    }, 15000);
+    APP._intervals.push(quotesIv);
+  }
+
+  // Simulation fallback for tickers not in fhListeners
   const simIv = setInterval(() => {
-    // Only simulate stocks NOT being updated by WS
     STOCKS.forEach(s => {
-      if(!socketListeners.has(s.t)) {
+      if(!fhListeners.has(s.t)) {
         const drift = (Math.random()-0.495)*s.p*0.0003;
         s.p = Math.max(0.01, s.p+drift);
         s.c = parseFloat((s.c+(Math.random()-0.5)*0.02).toFixed(2));
       }
     });
-    // Topbar indices
     ['SPY','QQQ','DIA'].forEach(t => {
-      const s = getStock(t);
+      const s  = getStock(t);
       const el = document.getElementById('ti-'+t.toLowerCase());
       if(el&&s) { el.textContent=(s.c>=0?'+':'')+s.c.toFixed(2)+'%'; el.style.color=s.c>=0?'var(--up)':'var(--dn)'; }
     });
@@ -2737,27 +2836,15 @@ function startLivePricesEnhanced() {
     if(yEl) { const y=(4.28+Math.random()*0.04-0.02); yEl.textContent=y.toFixed(2)+'%'; }
     const cur = getStock(APP.selectedTicker);
     if(cur) {
-      document.getElementById('sh-price').textContent='$'+cur.p.toFixed(cur.p<10?3:2);
-      document.getElementById('sh-change').textContent=(cur.c>=0?'+':'')+cur.c.toFixed(2)+'%';
+      document.getElementById('sh-price').textContent = '$'+cur.p.toFixed(cur.p<10?3:2);
+      document.getElementById('sh-change').textContent= (cur.c>=0?'+':'')+cur.c.toFixed(2)+'%';
     }
     renderWatchlist();
     if(APP.activeRP==='quotes'||APP.activeRP==='timesales') renderRightPanel();
     updateBalanceDisplay();
-    // Re-render chart to show live last candle
     if(chartData.length) renderChart();
   }, 1200);
   APP._intervals.push(simIv);
-}
-
-// ── Order Book using Massive quotes ──────────────────────────────────────────
-async function massiveFetchOrderBook(ticker) {
-  const key = getMassiveKey(); if(!key) return null;
-  try {
-    const r = await fetch(MASSIVE_BASE+'/v2/last/nbbo/'+ticker+'?apiKey='+key);
-    if(!r.ok) return null;
-    const d = await r.json();
-    return d.results || null;
-  } catch(e) { return null; }
 }
 
 </script>

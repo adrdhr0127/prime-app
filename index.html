@@ -788,6 +788,13 @@ input,select,button{font-family:inherit;font-size:inherit;}
           </div>
         </div>
         <div class="settings-row">
+          <div><div class="settings-lbl" style="color:var(--blu)">Massive.com API Key</div><div class="settings-desc">Real-time quotes, OHLCV candles, WebSocket streaming, fundamentals &amp; news. Get key at massive.com</div></div>
+          <div class="settings-control" style="display:flex;gap:6px;align-items:center;">
+            <input type="password" id="set-massivekey" placeholder="Enter Massive API key..." style="width:140px;background:var(--bg2);border:1px solid var(--bdr);border-radius:4px;padding:4px 7px;color:var(--t1);font-size:11px;outline:none;" oninput="saveMassiveKey()">
+            <span id="massive-status" style="font-size:10px;color:var(--t3);">Not set</span>
+          </div>
+        </div>
+        <div class="settings-row">
           <div><div class="settings-lbl">Credentials</div><div class="settings-desc">Change login username / password (edit USERS in HTML)</div></div>
           <div style="font-size:10px;color:var(--t3);">Edit USERS object</div>
         </div>
@@ -1623,6 +1630,8 @@ function renderRightPanel() {
         `).join('')}
       </div>`;
   } else if(tab === 'orderbook') {
+    // Attempt live order book from Massive snapshot
+    massiveFetchSnapshot(s.t).then(snap => { if(snap && snap.bid) renderOrderBookWithData(s, snap); });
     const asks=[], bids=[];
     const mid = s.p;
     for(let i=0;i<10;i++) { asks.push({p:(mid*(1+0.0001*(i+1)*(1+Math.random()*0.5))).toFixed(2),sz:Math.floor(Math.random()*500+10)}); }
@@ -1677,55 +1686,15 @@ function renderWatchlist() {
    STOCK SELECTION
 ════════════════════════════════════════════════ */
 function selectStock(ticker) {
-  const s = getStock(ticker);
-  if(!s) { showToast('Symbol not found: '+ticker,'error'); return; }
-  APP.selectedTicker = ticker;
-
-  // Update header
-  document.getElementById('sh-ticker').textContent = s.t;
-  document.getElementById('sh-exchange').textContent = s.sec;
-  const priceEl=document.getElementById('sh-price');
-  priceEl.textContent='$'+s.p.toFixed(s.p<10?3:2);
-  priceEl.className='sh-price '+(s.c>=0?'up':'dn');
-  const chgEl=document.getElementById('sh-change');
-  chgEl.textContent=(s.c>=0?'+':'')+s.c.toFixed(2)+'%';
-  chgEl.className='sh-change '+(s.c>=0?'up':'dn');
-
-  document.getElementById('sh-ohlcv').innerHTML=[
-    ['Open','$'+(s.p*(1-Math.random()*.008)).toFixed(2)],
-    ['High','$'+(s.p*(1+Math.random()*.012)).toFixed(2)],
-    ['Low','$'+(s.p*(1-Math.random()*.012)).toFixed(2)],
-    ['Vol',(Math.floor(Math.random()*80+5))+'M']
-  ].map(([l,v])=>`<div class="sh-stat"><div class="sh-stat-l">${l}</div><div class="sh-stat-v mono">${v}</div></div>`).join('');
-
-  // Generate chart data
-  const countMap={'1m':200,'5m':200,'15m':200,'30m':200,'1h':200,'D':300,'W':200,'M':100};
-  chartData = genCandles(s, APP.interval, countMap[APP.interval]||200);
-  chartOffset = 0;
-  renderChart();
-  renderWatchlist();
-  renderRightPanel();
-
-  // Update trade form
-  document.getElementById('tradeSymbol').value = ticker;
-  document.getElementById('tradePrice').value = s.p.toFixed(2);
-  updateTradeEstimate();
-
-  // Update analysis
+  // Delegate to Massive-enhanced version (falls back to simulation if no key)
+  selectStockWithMassive(ticker);
+  // Analysis & AI
   renderKelly(); renderGraham();
   if(APP.activeTab==='analysis' || document.getElementById('set-ai-auto')?.checked) {
     refreshAIOpinion();
   }
-  if(APP.activeTab==='news') loadNews();
+  if(APP.activeTab==='news') loadNewsMassive();
   if(APP.activeTab==='smart') renderSmartMoney();
-
-  // Update topbar indices
-  const indexTickers=['SPY','QQQ','DIA'];
-  indexTickers.forEach(t=>{
-    const idx=getStock(t);
-    const el=document.getElementById('ti-'+t.toLowerCase());
-    if(el&&idx) { el.textContent=(idx.c>=0?'+':'')+idx.c.toFixed(2)+'%'; el.className='tb-idx-val '+(idx.c>=0?'up':'dn'); }
-  });
 }
 
 /* ════════════════════════════════════════════════
@@ -1771,7 +1740,7 @@ function setActiveTab(tab) {
   APP.activeTab=tab;
   document.querySelectorAll('.sh-tab').forEach(el=>el.classList.toggle('active',el.dataset.tab===tab));
   document.querySelectorAll('.tab-panel').forEach(el=>el.classList.toggle('active',el.id==='tab-'+tab));
-  if(tab==='news') loadNews();
+  if(tab==='news') loadNewsMassive();
   if(tab==='analysis') { renderKelly(); renderGraham(); refreshAIOpinion(); }
   if(tab==='trade') { renderPositions(); updateTradeEstimate(); }
   if(tab==='smart') renderSmartMoney();
@@ -2169,38 +2138,8 @@ async function callAPI(prompt, maxTok=1000) {
    LIVE PRICE SIMULATION
 ════════════════════════════════════════════════ */
 function startLivePrices() {
-  const iv=setInterval(()=>{
-    STOCKS.forEach(s => {
-      const drift=(Math.random()-0.495)*s.p*0.0003;
-      s.p=Math.max(0.01,s.p+drift);
-      s.c=parseFloat((s.c+(Math.random()-0.5)*0.02).toFixed(2));
-    });
-    // Update topbar indices
-    ['SPY','QQQ','DIA'].forEach(t => {
-      const s=getStock(t);
-      const el=document.getElementById('ti-'+t.toLowerCase());
-      if(el&&s){ el.textContent=(s.c>=0?'+':'')+s.c.toFixed(2)+'%'; el.style.color=s.c>=0?'var(--up)':'var(--dn)'; }
-    });
-    // Update VIX
-    const vixEl=document.getElementById('ti-vix');
-    if(vixEl) { const v=(18+Math.random()*0.2-0.1); vixEl.textContent=v.toFixed(2); }
-    const yEl=document.getElementById('ti-10y');
-    if(yEl) { const y=(4.28+Math.random()*0.04-0.02); yEl.textContent=y.toFixed(2)+'%'; }
-    // Update current stock header
-    const cur=getStock(APP.selectedTicker);
-    if(cur) {
-      document.getElementById('sh-price').textContent='$'+cur.p.toFixed(cur.p<10?3:2);
-      document.getElementById('sh-change').textContent=(cur.c>=0?'+':'')+cur.c.toFixed(2)+'%';
-    }
-    // Update watchlist
-    renderWatchlist();
-    // Update right panel quotes
-    if(APP.activeRP==='quotes') renderRightPanel();
-    else if(APP.activeRP==='timesales') renderRightPanel();
-    // Update paper trading balance
-    updateBalanceDisplay();
-  },1200);
-  APP._intervals=[iv];
+  APP._intervals = [];
+  startLivePricesEnhanced(); // Massive-enhanced version
 }
 
 /* ════════════════════════════════════════════════
@@ -2317,22 +2256,31 @@ function loadSidebarSmart() {
 ════════════════════════════════════════════════ */
 function boot() {
   try { const t=sessionStorage.getItem('op-theme'); if(t) setTheme(t); } catch(e){}
-  // Load stored API key
+  // Load stored API keys and update UI
   try {
-    const k = localStorage.getItem('op-apikey');
-    if(k) {
-      updateApiKeyStatus();
-      showToast('API key loaded from storage','success');
-    } else {
-      setTimeout(() => showToast('Set your Anthropic API key in Settings for live news & AI opinions','info'), 1500);
+    const ak = localStorage.getItem('op-apikey');
+    if(ak) updateApiKeyStatus();
+    const mk = localStorage.getItem('op-massive');
+    if(mk) {
+      updateMassiveStatus(false);
+      // Pre-populate input placeholder
+      const inp = document.getElementById('set-massivekey');
+      if(inp) inp.placeholder = 'sk-***...'+mk.slice(-4);
+    }
+    if(!ak && !mk) {
+      setTimeout(() => showToast('Open Settings ⚙ to add your API keys for live data','info'), 2000);
     }
   } catch(e) {}
   initChart();
   renderWatchlist();
   selectStock('AAPL');
   startLivePrices();
-  // auto-refresh news every 5 min
-  setInterval(()=>{ if(APP.activeTab==='news') loadNews(); },300000);
+  // Auto-refresh news every 5 min
+  setInterval(()=>{ if(APP.activeTab==='news') loadNewsMassive(); },300000);
+  // Re-subscribe watchlist to WS after connection
+  setTimeout(()=>{
+    if(massiveSocketReady) massiveSubscribe(APP.watchlist);
+  }, 3000);
   updateBalanceDisplay();
   renderPositions();
   // Set first nav item active
@@ -2352,6 +2300,466 @@ window.addEventListener('load',()=>{
 
 // Update chart on window resize
 window.addEventListener('resize',()=>{ resizeChart(); renderChart(); });
+
+/* ════════════════════════════════════════════════
+   MASSIVE.COM API INTEGRATION
+   Formerly Polygon.io — institutional-grade market data
+════════════════════════════════════════════════ */
+
+// ── Key Management ────────────────────────────
+function getMassiveKey() {
+  try { return localStorage.getItem('op-massive') || ''; } catch(e) { return ''; }
+}
+function saveMassiveKey() {
+  const k = (document.getElementById('set-massivekey')?.value || '').trim();
+  try {
+    if(k) { localStorage.setItem('op-massive', k); updateMassiveStatus(true); }
+  } catch(e) {}
+}
+function updateMassiveStatus(connected) {
+  const el = document.getElementById('massive-status');
+  const inp = document.getElementById('set-massivekey');
+  if(!el) return;
+  el.textContent = connected ? '✓ Connected' : (getMassiveKey() ? '✓ Saved' : 'Not set');
+  el.style.color = (connected || getMassiveKey()) ? 'var(--up)' : 'var(--t3)';
+  if(inp && getMassiveKey() && !inp.value) inp.placeholder = 'sk-***...'+getMassiveKey().slice(-4);
+}
+
+const MASSIVE_BASE = 'https://api.massive.com';
+const MASSIVE_WS   = 'wss://socket.massive.com/stocks';
+let   massiveSocket = null;
+let   massiveSocketReady = false;
+const socketListeners = new Set(); // tickers currently subscribed
+
+// ── REST: Real-time snapshot (quote + day OHLCV) ──────────────────────────────
+async function massiveFetchSnapshot(ticker) {
+  const key = getMassiveKey(); if(!key) return null;
+  try {
+    const r = await fetch(MASSIVE_BASE+'/v2/snapshot/locale/us/markets/stocks/tickers/'+ticker+'?apiKey='+key);
+    if(!r.ok) return null;
+    const d = await r.json();
+    const t = d.ticker; if(!t) return null;
+    return {
+      price:   t.day?.c  || t.prevDay?.c || 0,
+      open:    t.day?.o  || 0,
+      high:    t.day?.h  || 0,
+      low:     t.day?.l  || 0,
+      close:   t.day?.c  || 0,
+      prevClose: t.prevDay?.c || 0,
+      volume:  t.day?.v  || 0,
+      vwap:    t.day?.vw || 0,
+      changeAmt:   t.todaysChange    || 0,
+      changePct:   t.todaysChangePerc|| 0,
+      lastTrade:   t.lastTrade?.p    || 0,
+      lastSize:    t.lastTrade?.s    || 0,
+      bid:         t.lastQuote?.P    || 0,
+      ask:         t.lastQuote?.p    || 0,
+      bidSize:     t.lastQuote?.S    || 0,
+      askSize:     t.lastQuote?.s    || 0,
+    };
+  } catch(e) { return null; }
+}
+
+// ── REST: Aggregate candles (OHLCV) ──────────────────────────────────────────
+async function massiveFetchCandles(ticker, interval, fromDate, toDate) {
+  const key = getMassiveKey(); if(!key) return null;
+  const map = {
+    '1m':'minute/1','5m':'minute/5','15m':'minute/15','30m':'minute/30',
+    '1h':'hour/1','D':'day/1','W':'week/1','M':'month/1'
+  };
+  const span = (map[interval]||'day/1').split('/');
+  const url = `${MASSIVE_BASE}/v2/aggs/ticker/${ticker}/range/${span[1]}/${span[0]}/${fromDate}/${toDate}?adjusted=true&sort=asc&limit=500&apiKey=${key}`;
+  try {
+    const r = await fetch(url);
+    if(!r.ok) return null;
+    const d = await r.json();
+    if(!d.results || !d.results.length) return null;
+    return d.results.map(bar => ({
+      o: bar.o, h: bar.h, l: bar.l,
+      c: bar.c, v: bar.v, vw: bar.vw, t: bar.t
+    }));
+  } catch(e) { return null; }
+}
+
+// ── REST: Ticker Details (fundamentals) ──────────────────────────────────────
+async function massiveFetchDetails(ticker) {
+  const key = getMassiveKey(); if(!key) return null;
+  try {
+    const r = await fetch(MASSIVE_BASE+'/v3/reference/tickers/'+ticker+'?apiKey='+key);
+    if(!r.ok) return null;
+    const d = await r.json();
+    return d.results || null;
+  } catch(e) { return null; }
+}
+
+// ── REST: Financials (EPS, revenue, book value) ───────────────────────────────
+async function massiveFetchFinancials(ticker) {
+  const key = getMassiveKey(); if(!key) return null;
+  try {
+    const r = await fetch(MASSIVE_BASE+'/vX/reference/financials?ticker='+ticker+'&limit=4&apiKey='+key);
+    if(!r.ok) return null;
+    const d = await r.json();
+    const latest = d.results?.[0];
+    if(!latest) return null;
+    const ic = latest.financials?.income_statement;
+    const bs = latest.financials?.balance_sheet;
+    const shares = bs?.outstanding_shares?.value || 1;
+    return {
+      eps:   ic?.net_income_loss?.value ? (ic.net_income_loss.value / shares) : null,
+      bvps:  bs?.equity?.value          ? (bs.equity.value / shares)          : null,
+      revenue: ic?.revenues?.value      || null,
+      netIncome: ic?.net_income_loss?.value || null,
+    };
+  } catch(e) { return null; }
+}
+
+// ── REST: News (Benzinga feed) ────────────────────────────────────────────────
+async function massiveFetchNews(ticker, limit=8) {
+  const key = getMassiveKey(); if(!key) return null;
+  try {
+    const r = await fetch(MASSIVE_BASE+'/v2/reference/news?ticker='+ticker+'&limit='+limit+'&apiKey='+key);
+    if(!r.ok) return null;
+    const d = await r.json();
+    return (d.results || []).map(item => ({
+      title:     item.title    || '',
+      summary:   item.description || '',
+      source:    item.publisher?.name || 'Benzinga',
+      url:       item.article_url || '',
+      time:      item.published_utc ? timeAgo(item.published_utc) : 'Recently',
+      sentiment: item.insights?.[0]?.sentiment || 'neutral',
+      tickers:   item.tickers || []
+    }));
+  } catch(e) { return null; }
+}
+
+// ── REST: Grouped daily snapshot (all tickers) ────────────────────────────────
+async function massiveFetchMarketSnapshot() {
+  const key = getMassiveKey(); if(!key) return;
+  try {
+    const r = await fetch(MASSIVE_BASE+'/v2/snapshot/locale/us/markets/stocks/tickers?apiKey='+key+'&include_otc=false');
+    if(!r.ok) return;
+    const d = await r.json();
+    (d.tickers || []).forEach(t => {
+      const s = getStock(t.ticker);
+      if(s && t.day) {
+        s.p = t.day.c || s.p;
+        s.c = parseFloat((t.todaysChangePerc || 0).toFixed(2));
+      }
+    });
+    console.log('[Massive] Market snapshot updated');
+  } catch(e) {}
+}
+
+// ── WebSocket: Live streaming ─────────────────────────────────────────────────
+function massiveConnectWS() {
+  const key = getMassiveKey(); if(!key) return;
+  if(massiveSocket && massiveSocket.readyState < 2) return; // already open/connecting
+
+  massiveSocket = new WebSocket(MASSIVE_WS);
+
+  massiveSocket.addEventListener('open', () => {
+    massiveSocket.send(JSON.stringify({action:'auth', params: key}));
+    console.log('[Massive WS] Connecting...');
+  });
+
+  massiveSocket.addEventListener('message', e => {
+    try {
+      const msgs = JSON.parse(e.data);
+      msgs.forEach(msg => {
+        if(msg.ev === 'connected') {
+          console.log('[Massive WS] Connected');
+        }
+        if(msg.ev === 'auth_success') {
+          massiveSocketReady = true;
+          console.log('[Massive WS] Authenticated');
+          showToast('Live streaming connected via Massive','success');
+          // Subscribe to watchlist + current stock
+          const subs = [...new Set([APP.selectedTicker, ...APP.watchlist])];
+          massiveSubscribe(subs);
+        }
+        if(msg.ev === 'auth_failed') {
+          showToast('Massive API key invalid — check Settings','error');
+          massiveSocketReady = false;
+        }
+        // Per-second aggregate (AM = minute, A = second)
+        if(msg.ev === 'AM' || msg.ev === 'A') {
+          const s = getStock(msg.sym);
+          if(s && msg.c) {
+            const oldP = s.p;
+            s.p = msg.c;
+            if(msg.op) s.c = parseFloat(((msg.c - msg.op) / msg.op * 100).toFixed(2));
+            // Append live candle to chart if this is the selected stock
+            if(msg.sym === APP.selectedTicker && chartData.length) {
+              const last = chartData[chartData.length-1];
+              const now  = Date.now();
+              const barMs = intervalMs(APP.interval);
+              if(now - last.t < barMs) {
+                // Update current bar
+                last.c = msg.c;
+                last.h = Math.max(last.h, msg.c);
+                last.l = Math.min(last.l, msg.c);
+                last.v += (msg.av || 0);
+              } else {
+                // New bar
+                chartData.push({o:msg.o||msg.c,h:msg.h||msg.c,l:msg.l||msg.c,c:msg.c,v:msg.av||0,t:now});
+              }
+            }
+          }
+        }
+        // Real-time trade (T)
+        if(msg.ev === 'T' && msg.sym === APP.selectedTicker) {
+          // Update header price live
+          const priceEl = document.getElementById('sh-price');
+          if(priceEl && msg.p) {
+            const s = getStock(msg.sym);
+            if(s) {
+              s.p = msg.p;
+              priceEl.textContent = '$'+msg.p.toFixed(msg.p<10?3:2);
+            }
+          }
+        }
+      });
+    } catch(e2) {}
+  });
+
+  massiveSocket.addEventListener('close', () => {
+    massiveSocketReady = false;
+    console.log('[Massive WS] Closed. Reconnecting in 5s...');
+    setTimeout(massiveConnectWS, 5000);
+  });
+
+  massiveSocket.addEventListener('error', () => {
+    massiveSocketReady = false;
+  });
+}
+
+function massiveSubscribe(tickers) {
+  if(!massiveSocket || !massiveSocketReady) return;
+  // Subscribe to per-second aggregates + trades for each ticker
+  const params = tickers.flatMap(t => ['AM.'+t, 'T.'+t]).join(',');
+  massiveSocket.send(JSON.stringify({action:'subscribe', params}));
+  tickers.forEach(t => socketListeners.add(t));
+  console.log('[Massive WS] Subscribed:', tickers.join(', '));
+}
+
+function massiveUnsubscribeAll() {
+  if(!massiveSocket || !massiveSocketReady || !socketListeners.size) return;
+  const params = [...socketListeners].flatMap(t => ['AM.'+t,'T.'+t]).join(',');
+  massiveSocket.send(JSON.stringify({action:'unsubscribe', params}));
+  socketListeners.clear();
+}
+
+function intervalMs(interval) {
+  const map = {'1m':60000,'5m':300000,'15m':900000,'30m':1800000,'1h':3600000,'D':86400000,'W':604800000,'M':2592000000};
+  return map[interval] || 86400000;
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function timeAgo(isoStr) {
+  const ms = Date.now() - new Date(isoStr).getTime();
+  if(ms < 60000)   return 'Just now';
+  if(ms < 3600000) return Math.floor(ms/60000)+' min ago';
+  if(ms < 86400000)return Math.floor(ms/3600000)+' hr ago';
+  return Math.floor(ms/86400000)+' days ago';
+}
+
+function toDateStr(ts) {
+  const d = new Date(ts);
+  return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+}
+
+// ── Enhanced selectStock with real data ──────────────────────────────────────
+async function selectStockWithMassive(ticker) {
+  const s = getStock(ticker);
+  if(!s) { showToast('Symbol not found: '+ticker,'error'); return; }
+  APP.selectedTicker = ticker;
+
+  // Always render with local data first (instant)
+  updateStockHeader(s);
+  chartData = genCandles(s, APP.interval, 300);
+  chartOffset = 0; renderChart();
+  renderWatchlist(); renderRightPanel();
+  document.getElementById('tradeSymbol').value = ticker;
+  document.getElementById('tradePrice').value = s.p.toFixed(2);
+  updateTradeEstimate(); renderKelly(); renderGraham();
+  if(APP.activeTab==='news') loadNews();
+  if(APP.activeTab==='smart') renderSmartMoney();
+
+  // Subscribe to WS for this ticker
+  if(massiveSocketReady) {
+    massiveSubscribe([ticker]);
+  }
+
+  const key = getMassiveKey();
+  if(!key) return; // No key — stay with simulated data
+
+  // Async: fetch real snapshot
+  massiveFetchSnapshot(ticker).then(snap => {
+    if(!snap) return;
+    s.p  = snap.price  || s.p;
+    s.c  = parseFloat((snap.changePct || 0).toFixed(2));
+    updateStockHeader(s, snap);
+    document.getElementById('tradePrice').value = s.p.toFixed(2);
+    updateTradeEstimate();
+  });
+
+  // Async: fetch real candles
+  const now = Date.now();
+  const dayLookback = {'1m':2,'5m':5,'15m':10,'30m':20,'1h':30,'D':365,'W':730,'M':1825};
+  const days = dayLookback[APP.interval] || 365;
+  const fromDate = toDateStr(now - days * 86400000);
+  const toDate   = toDateStr(now);
+  massiveFetchCandles(ticker, APP.interval, fromDate, toDate).then(candles => {
+    if(candles && candles.length >= 5) {
+      chartData  = candles;
+      chartOffset = 0;
+      renderChart();
+      showToast('Live candles loaded from Massive','success');
+    }
+  });
+
+  // Async: fetch fundamentals and update Graham score
+  massiveFetchFinancials(ticker).then(fin => {
+    if(!fin) return;
+    if(fin.eps  !== null) s.eps = fin.eps;
+    if(fin.bvps !== null) s.bv  = fin.bvps;
+    renderKelly(); renderGraham();
+  });
+
+  // Update topbar indices
+  ['SPY','QQQ','DIA'].forEach(t => {
+    const idx = getStock(t);
+    const el  = document.getElementById('ti-'+t.toLowerCase());
+    if(el && idx) { el.textContent=(idx.c>=0?'+':'')+idx.c.toFixed(2)+'%'; el.style.color=idx.c>=0?'var(--up)':'var(--dn)'; }
+  });
+}
+
+function updateStockHeader(s, snap) {
+  document.getElementById('sh-ticker').textContent = s.t;
+  document.getElementById('sh-exchange').textContent = s.sec;
+  const priceEl = document.getElementById('sh-price');
+  priceEl.textContent = '$'+s.p.toFixed(s.p<10?3:2);
+  priceEl.className = 'sh-price '+(s.c>=0?'up':'dn');
+  const chgEl = document.getElementById('sh-change');
+  chgEl.textContent = (s.c>=0?'+':'')+s.c.toFixed(2)+'%';
+  chgEl.className = 'sh-change '+(s.c>=0?'up':'dn');
+
+  if(snap) {
+    document.getElementById('sh-ohlcv').innerHTML = [
+      ['Open',  '$'+snap.open.toFixed(2)],
+      ['High',  '$'+snap.high.toFixed(2)],
+      ['Low',   '$'+snap.low.toFixed(2)],
+      ['Prev',  '$'+snap.prevClose.toFixed(2)],
+      ['Vol',   snap.volume >= 1e6 ? (snap.volume/1e6).toFixed(1)+'M' : (snap.volume/1000).toFixed(0)+'K'],
+      ['VWAP',  snap.vwap ? '$'+snap.vwap.toFixed(2) : '—'],
+    ].map(([l,v]) => `<div class="sh-stat"><div class="sh-stat-l">${l}</div><div class="sh-stat-v mono">${v}</div></div>`).join('');
+  } else {
+    document.getElementById('sh-ohlcv').innerHTML = [
+      ['Open','$'+(s.p*(1-Math.random()*.008)).toFixed(2)],
+      ['High','$'+(s.p*(1+Math.random()*.012)).toFixed(2)],
+      ['Low', '$'+(s.p*(1-Math.random()*.012)).toFixed(2)],
+      ['Vol', Math.floor(Math.random()*80+5)+'M']
+    ].map(([l,v]) => `<div class="sh-stat"><div class="sh-stat-l">${l}</div><div class="sh-stat-v mono">${v}</div></div>`).join('');
+  }
+}
+
+// ── Enhanced loadNews using Massive Benzinga feed ─────────────────────────────
+async function loadNewsMassive() {
+  const el = document.getElementById('newsGrid');
+  const s  = getStock(APP.selectedTicker);
+  el.innerHTML = '<div class="news-loading"><span class="spin"></span> Loading news for '+APP.selectedTicker+'...</div>';
+
+  const key = getMassiveKey();
+  if(key) {
+    const items = await massiveFetchNews(APP.selectedTicker, 10);
+    if(items && items.length) {
+      el.innerHTML = items.map(item => `
+        <div class="news-item" onclick="window.open('${escHtml(item.url)}','_blank')" style="cursor:pointer;">
+          <div class="ni-src-badge">${(item.source||'NEWS').slice(0,4).toUpperCase()}</div>
+          <div class="ni-body">
+            <div class="ni-meta">
+              <span class="ni-source">${escHtml(item.source||'News')}</span>
+              <span class="ni-time">${item.time}</span>
+              <span class="ni-sent ns-${item.sentiment==='positive'?'pos':item.sentiment==='negative'?'neg':'neu'}">${item.sentiment}</span>
+              ${item.tickers.length?'<span style="font-size:9px;color:var(--gold)">'+item.tickers.slice(0,3).join(' ')+'</span>':''}
+            </div>
+            <div class="ni-title">${escHtml(item.title)}</div>
+            <div class="ni-summary">${escHtml(item.summary)}</div>
+          </div>
+        </div>`).join('');
+      return;
+    }
+  }
+
+  // Fallback to Claude AI news if no Massive key or no results
+  const anthropicKey = getApiKey();
+  if(!anthropicKey) {
+    el.innerHTML = '<div class="news-loading" style="color:var(--t3);padding:16px;line-height:1.9;">Set a <b style="color:var(--gold)">Massive API key</b> or <b style="color:var(--blu)">Anthropic API key</b> in Settings ⚙ to load live news.</div>';
+    return;
+  }
+  // Use existing Claude news loader
+  loadNews();
+}
+
+// ── Enhanced startLivePrices using Massive snapshots ─────────────────────────
+function startLivePricesEnhanced() {
+  const key = getMassiveKey();
+  if(key) {
+    // Connect WebSocket for real-time streaming
+    massiveConnectWS();
+    // Fetch full market snapshot immediately (delayed on free tier, real-time on paid)
+    massiveFetchMarketSnapshot();
+    // Refresh market snapshot every 60s (REST fallback if WS drops)
+    const snapIv = setInterval(massiveFetchMarketSnapshot, 60000);
+    APP._intervals.push(snapIv);
+    showToast('Massive.com API connected — live data active','success');
+  }
+
+  // Simulation interval (runs always as a fallback / for stocks not in Massive)
+  const simIv = setInterval(() => {
+    // Only simulate stocks NOT being updated by WS
+    STOCKS.forEach(s => {
+      if(!socketListeners.has(s.t)) {
+        const drift = (Math.random()-0.495)*s.p*0.0003;
+        s.p = Math.max(0.01, s.p+drift);
+        s.c = parseFloat((s.c+(Math.random()-0.5)*0.02).toFixed(2));
+      }
+    });
+    // Topbar indices
+    ['SPY','QQQ','DIA'].forEach(t => {
+      const s = getStock(t);
+      const el = document.getElementById('ti-'+t.toLowerCase());
+      if(el&&s) { el.textContent=(s.c>=0?'+':'')+s.c.toFixed(2)+'%'; el.style.color=s.c>=0?'var(--up)':'var(--dn)'; }
+    });
+    const vixEl = document.getElementById('ti-vix');
+    if(vixEl) { const v=(18+Math.random()*0.2-0.1); vixEl.textContent=v.toFixed(2); }
+    const yEl = document.getElementById('ti-10y');
+    if(yEl) { const y=(4.28+Math.random()*0.04-0.02); yEl.textContent=y.toFixed(2)+'%'; }
+    const cur = getStock(APP.selectedTicker);
+    if(cur) {
+      document.getElementById('sh-price').textContent='$'+cur.p.toFixed(cur.p<10?3:2);
+      document.getElementById('sh-change').textContent=(cur.c>=0?'+':'')+cur.c.toFixed(2)+'%';
+    }
+    renderWatchlist();
+    if(APP.activeRP==='quotes'||APP.activeRP==='timesales') renderRightPanel();
+    updateBalanceDisplay();
+    // Re-render chart to show live last candle
+    if(chartData.length) renderChart();
+  }, 1200);
+  APP._intervals.push(simIv);
+}
+
+// ── Order Book using Massive quotes ──────────────────────────────────────────
+async function massiveFetchOrderBook(ticker) {
+  const key = getMassiveKey(); if(!key) return null;
+  try {
+    const r = await fetch(MASSIVE_BASE+'/v2/last/nbbo/'+ticker+'?apiKey='+key);
+    if(!r.ok) return null;
+    const d = await r.json();
+    return d.results || null;
+  } catch(e) { return null; }
+}
+
 </script>
 </body>
 </html>

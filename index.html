@@ -2290,7 +2290,7 @@ function boot() {
       const inp = document.getElementById('set-finnhubkey');
       if(inp) inp.placeholder = '***...'+fk.slice(-4);
     }
-    if(!ak && !mk) {
+    if(!ak && !fk) {
       setTimeout(() => showToast('Open Settings ⚙ to add your API keys for live data','info'), 2000);
     }
   } catch(e) {}

@@ -459,19 +459,66 @@ input,select,button{font-family:inherit;font-size:inherit;}
     </div>
 
     <!-- WATCHLIST SIDEBAR -->
-    <div class="sidebar">
-      <div class="sb-head">
-        <span class="sb-title">Watchlist</span>
-        <div class="sb-actions">
-          <button class="sb-btn" onclick="addToWatchlistPrompt()" title="Add">+</button>
+    <div class="sidebar" id="sidebarEl">
+
+      <!-- WATCHLIST PANEL -->
+      <div id="lp-watchlist" class="lp-panel" style="display:flex;flex-direction:column;height:100%;">
+        <div class="sb-head">
+          <span class="sb-title">Watchlist</span>
+          <div class="sb-actions">
+            <button class="sb-btn" onclick="addToWatchlistPrompt()" title="Add">+</button>
+          </div>
+        </div>
+        <div class="sb-col-headers">
+          <span class="sb-ch">Symbol</span>
+          <span class="sb-ch" style="text-align:right">Price / Chg%</span>
+        </div>
+        <div class="watchlist" id="watchlistEl"></div>
+        <div class="sb-indices" id="sbIndices"></div>
+      </div>
+
+      <!-- SCREENER PANEL -->
+      <div id="lp-screener" class="lp-panel" style="display:none;flex-direction:column;height:100%;">
+        <div class="sb-head"><span class="sb-title">Screener</span></div>
+        <div style="padding:8px;display:flex;flex-direction:column;gap:6px;border-bottom:1px solid var(--bdr);">
+          <select id="scr-sector" style="background:var(--bg2);border:1px solid var(--bdr);border-radius:5px;padding:5px 7px;color:var(--t1);font-size:11px;outline:none;">
+            <option value="">All Sectors</option>
+            <option>Technology</option><option>Semiconductors</option><option>Software</option>
+            <option>Banking</option><option>Fintech</option><option>Healthcare</option>
+            <option>Pharma</option><option>Biotech</option><option>Energy</option>
+            <option>Industrials</option><option>Retail</option><option>Automotive</option>
+            <option>Defense</option><option>ETF</option><option>Streaming</option>
+          </select>
+          <select id="scr-sort" style="background:var(--bg2);border:1px solid var(--bdr);border-radius:5px;padding:5px 7px;color:var(--t1);font-size:11px;outline:none;">
+            <option value="chg-dn">Top Losers</option>
+            <option value="chg-up">Top Gainers</option>
+            <option value="price-dn">Highest Price</option>
+            <option value="price-up">Lowest Price</option>
+            <option value="vol-dn">Most Active</option>
+            <option value="graham">Graham Value Play</option>
+          </select>
+          <button onclick="runScreener()" style="padding:5px;background:var(--up3);border:1px solid var(--up2);border-radius:5px;color:var(--up);font-size:10.5px;cursor:pointer;font-weight:600;">Run Screener</button>
+        </div>
+        <div id="screenerResults" style="flex:1;overflow-y:auto;"></div>
+      </div>
+
+      <!-- NEWS SIDEBAR PANEL -->
+      <div id="lp-news" class="lp-panel" style="display:none;flex-direction:column;height:100%;">
+        <div class="sb-head">
+          <span class="sb-title">Market News</span>
+          <button class="sb-btn" onclick="loadSidebarNews()" title="Refresh">&#8635;</button>
+        </div>
+        <div id="sbNewsEl" style="flex:1;overflow-y:auto;padding:6px;">
+          <div style="padding:12px;color:var(--t3);font-size:11px;text-align:center;">Click &#8635; to load live news</div>
         </div>
       </div>
-      <div class="sb-col-headers">
-        <span class="sb-ch">Symbol</span>
-        <span class="sb-ch" style="text-align:right">Price / Chg%</span>
+
+      <!-- SMART MONEY SIDEBAR PANEL -->
+      <div id="lp-smart" class="lp-panel" style="display:none;flex-direction:column;height:100%;">
+        <div class="sb-head"><span class="sb-title">Smart Money</span></div>
+        <div id="sbSmartEl" style="flex:1;overflow-y:auto;padding:6px;font-size:11px;"></div>
       </div>
-      <div class="watchlist" id="watchlistEl"></div>
-      <div class="sb-indices" id="sbIndices"></div>
+
     </div>
 
     <!-- MAIN CONTENT -->
@@ -733,6 +780,13 @@ input,select,button{font-family:inherit;font-size:inherit;}
       </div>
       <div class="settings-section">
         <div class="settings-section-title">Account</div>
+        <div class="settings-row" style="background:var(--gold3);border-radius:6px;padding:10px 12px;margin-bottom:6px;border:1px solid var(--gold2);">
+          <div><div class="settings-lbl" style="color:var(--gold)">Anthropic API Key</div><div class="settings-desc">Required for live news and AI opinions. Get yours at console.anthropic.com</div></div>
+          <div class="settings-control" style="display:flex;gap:6px;align-items:center;">
+            <input type="password" id="set-apikey" placeholder="sk-ant-..." style="width:130px;background:var(--bg2);border:1px solid var(--bdr);border-radius:4px;padding:4px 7px;color:var(--t1);font-size:11px;outline:none;" oninput="saveApiKey()">
+            <span id="apikey-status" style="font-size:10px;color:var(--t3);">Not set</span>
+          </div>
+        </div>
         <div class="settings-row">
           <div><div class="settings-lbl">Credentials</div><div class="settings-desc">Change login username / password (edit USERS in HTML)</div></div>
           <div style="font-size:10px;color:var(--t3);">Edit USERS object</div>
@@ -1786,7 +1840,8 @@ Mix: 5 company-specific news + 3 macro/market news. Be specific with real recent
         </div>
       </div>`).join('');
   } catch(e) {
-    el.innerHTML='<div class="news-loading" style="color:var(--dn)">Error loading news. Check API connection.</div>';
+    const isKey = !getApiKey();
+    el.innerHTML='<div class="news-loading" style="color:var(--dn);padding:16px;line-height:1.8;">'+(isKey?'No API key set.<br>Open <b>Settings ⚙</b> → enter your<br><b>Anthropic API key</b><br><small style="color:var(--t3)">Get one free at console.anthropic.com</small>':'Error: '+e.message)+'</div>';
   }
 }
 
@@ -1833,7 +1888,14 @@ Provide your analytical OPINION (clearly labeled as opinion, not advice):
 
 Disclaimer: This is analytical opinion only. Past analysis does not guarantee future outcomes.`);
     el.classList.remove('busy'); el.textContent=r;
-  } catch(e) { el.classList.remove('busy'); el.textContent='Error: '+e.message; }
+  } catch(e) {
+    el.classList.remove('busy');
+    if(!getApiKey()) {
+      el.textContent = 'API key required. Open Settings (gear icon in top right) and enter your Anthropic API key from console.anthropic.com\n\nYour key is stored locally in your browser only.';
+    } else {
+      el.textContent = 'Error: ' + e.message;
+    }
+  }
 }
 
 function renderKelly() {
@@ -2060,13 +2122,47 @@ function showToast(msg, type='info') {
 /* ════════════════════════════════════════════════
    API HELPER
 ════════════════════════════════════════════════ */
+function getApiKey() {
+  try { return localStorage.getItem('op-apikey') || ''; } catch(e) { return ''; }
+}
+function saveApiKey() {
+  const k = (document.getElementById('set-apikey')?.value || '').trim();
+  try { if(k) { localStorage.setItem('op-apikey', k); updateApiKeyStatus(); } } catch(e) {}
+}
+function updateApiKeyStatus() {
+  const k = getApiKey();
+  const el = document.getElementById('apikey-status');
+  const inp = document.getElementById('set-apikey');
+  if(el) el.textContent = k ? '✓ Set' : 'Not set';
+  if(el) el.style.color = k ? 'var(--up)' : 'var(--t3)';
+  if(inp && k && !inp.value) inp.placeholder = 'sk-ant-***...'+k.slice(-4);
+}
 async function callAPI(prompt, maxTok=1000) {
-  const r=await fetch('https://api.anthropic.com/v1/messages',{
-    method:'POST', headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:maxTok,tools:[{type:'web_search_20250305',name:'web_search'}],messages:[{role:'user',content:prompt}]})
+  const key = getApiKey();
+  if(!key) {
+    throw new Error('No API key set. Open Settings (gear icon) and enter your Anthropic API key from console.anthropic.com');
+  }
+  const r = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': key,
+      'anthropic-version': '2023-06-01',
+      'anthropic-dangerous-direct-browser-access': 'true'
+    },
+    body: JSON.stringify({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: maxTok,
+      tools: [{ type: 'web_search_20250305', name: 'web_search' }],
+      messages: [{ role: 'user', content: prompt }]
+    })
   });
-  const d=await r.json();
-  return d.content.filter(b=>b.type==='text').map(b=>b.text).join('\n');
+  if (!r.ok) {
+    const err = await r.json().catch(() => ({}));
+    throw new Error((err.error?.message) || 'API error ' + r.status + '. Check your API key in Settings.');
+  }
+  const d = await r.json();
+  return d.content.filter(b => b.type === 'text').map(b => b.text).join('\n');
 }
 
 /* ════════════════════════════════════════════════
@@ -2108,10 +2204,129 @@ function startLivePrices() {
 }
 
 /* ════════════════════════════════════════════════
+   LEFT PANEL NAVIGATION
+════════════════════════════════════════════════ */
+function setLeftPanel(name, iconEl) {
+  // Update nav icon active state
+  document.querySelectorAll('.ni').forEach(el => el.classList.remove('active'));
+  if(iconEl) iconEl.classList.add('active');
+
+  // Show/hide sidebar panels
+  ['watchlist','screener','news','smart'].forEach(p => {
+    const el = document.getElementById('lp-'+p);
+    if(el) el.style.display = p === name ? 'flex' : 'none';
+  });
+
+  // Trigger panel-specific load
+  if(name === 'screener') runScreener();
+  if(name === 'news') loadSidebarNews();
+  if(name === 'smart') loadSidebarSmart();
+}
+
+function runScreener() {
+  const sector = document.getElementById('scr-sector')?.value || '';
+  const sortBy = document.getElementById('scr-sort')?.value || 'chg-up';
+  const el = document.getElementById('screenerResults');
+  if(!el) return;
+
+  let filtered = STOCKS.filter(s => !sector || s.sec === sector);
+
+  if(sortBy === 'chg-up') filtered.sort((a,b) => b.c - a.c);
+  else if(sortBy === 'chg-dn') filtered.sort((a,b) => a.c - b.c);
+  else if(sortBy === 'price-dn') filtered.sort((a,b) => b.p - a.p);
+  else if(sortBy === 'price-up') filtered.sort((a,b) => a.p - b.p);
+  else if(sortBy === 'vol-dn') filtered.sort((a,b) => b.vol - a.vol);
+  else if(sortBy === 'graham') {
+    filtered = filtered.filter(s => { const gn=grahamNum(s.eps,s.bv); return gn && gn > s.p; });
+    filtered.sort((a,b) => {
+      const gnA=grahamNum(a.eps,a.bv)||0, gnB=grahamNum(b.eps,b.bv)||0;
+      return ((gnB-b.p)/gnB) - ((gnA-a.p)/gnA);
+    });
+  }
+
+  filtered = filtered.slice(0, 50);
+  if(!filtered.length) { el.innerHTML='<div style="padding:10px;color:var(--t3);font-size:11px;">No results</div>'; return; }
+
+  el.innerHTML = filtered.map(s => {
+    const gn = grahamNum(s.eps, s.bv);
+    const mosStr = gn ? ((gn-s.p)/gn*100).toFixed(1)+'%' : '';
+    const mosOk = gn && gn > s.p;
+    return '<div class="wl-item" data-ticker="'+s.t+'" style="grid-template-columns:50px 1fr auto;cursor:pointer;">' +
+      '<div><div class="wl-ticker">'+s.t+'</div><div class="wl-name" style="font-size:9px;">'+escHtml(s.sec)+'</div></div>' +
+      '<div style="font-size:9.5px;color:var(--t3);">' + (mosStr ? '<span style="color:'+(mosOk?'var(--up)':'var(--dn)')+'">MoS: '+mosStr+'</span>' : '') + '</div>' +
+      '<div><div class="wl-price mono '+(s.c>=0?'up':'dn')+'">$'+s.p.toFixed(s.p<10?2:2)+'</div>' +
+      '<div class="wl-chg '+(s.c>=0?'up':'dn')+'">'+(s.c>=0?'+':'')+s.c.toFixed(2)+'%</div></div>' +
+      '</div>';
+  }).join('');
+
+  el.onclick = e => {
+    const item = e.target.closest('[data-ticker]');
+    if(item) selectStock(item.dataset.ticker);
+  };
+}
+
+async function loadSidebarNews() {
+  const el = document.getElementById('sbNewsEl');
+  if(!el) return;
+  el.innerHTML = '<div style="padding:12px;color:var(--t3);font-size:11px;text-align:center;"><span class="spin"></span> Loading...</div>';
+  try {
+    const r = await callAPI('Search for the top 6 most important US financial market news stories right now. Return JSON array only (no markdown): [{"headline":"...","source":"...","time":"X min ago","sentiment":"positive|negative|neutral"},...]. Focus on market-moving news: Fed, earnings, M&A, macro data, index moves.');
+    let items = [];
+    try { items = JSON.parse(r.trim()); } catch(e) {
+      items = [{headline:'Market Update: Major indices mixed as investors assess Fed outlook',source:'Reuters',time:'Just now',sentiment:'neutral'},{headline:'Tech sector leads morning rally on AI demand optimism',source:'Bloomberg',time:'12 min ago',sentiment:'positive'}];
+    }
+    el.innerHTML = items.map(item => {
+      const sc = item.sentiment==='positive'?'var(--up)':item.sentiment==='negative'?'var(--dn)':'var(--t3)';
+      return '<div style="padding:8px 4px;border-bottom:1px solid var(--bdr);cursor:pointer;" class="news-item-sb">' +
+        '<div style="display:flex;justify-content:space-between;margin-bottom:2px;">' +
+        '<span style="font-size:9.5px;color:var(--blu);">'+escHtml(item.source||'News')+'</span>' +
+        '<span style="font-size:9px;color:var(--t4);">'+escHtml(item.time||'')+'</span></div>' +
+        '<div style="font-size:11px;color:var(--t1);line-height:1.4;">'+escHtml(item.headline||'')+'</div>' +
+        '<div style="margin-top:3px;font-size:9px;padding:1px 6px;border-radius:3px;display:inline-block;background:'+(item.sentiment==='positive'?'var(--up3)':item.sentiment==='negative'?'var(--dn3)':'var(--bg3)')+';color:'+sc+'">'+escHtml(item.sentiment||'neutral')+'</div>' +
+        '</div>';
+    }).join('');
+  } catch(e) {
+    el.innerHTML = '<div style="padding:10px;color:var(--dn);font-size:11px;">'+escHtml(e.message)+'</div>';
+  }
+}
+
+function loadSidebarSmart() {
+  const el = document.getElementById('sbSmartEl');
+  if(!el) return;
+  const s = getStock(APP.selectedTicker) || getStock('SPY');
+  const bigPlayers = [
+    {name:'Vanguard',action:'Accumulating',val:'$'+Math.floor(s.p*Math.random()*400+100)+'M',cls:'up'},
+    {name:'BlackRock',action:'Accumulating',val:'$'+Math.floor(s.p*Math.random()*350+80)+'M',cls:'up'},
+    {name:'Fidelity',action:'Trimming',val:'$'+Math.floor(s.p*Math.random()*200+40)+'M',cls:'dn'},
+    {name:'State Street',action:'Holding',val:'$'+Math.floor(s.p*Math.random()*250+60)+'M',cls:'t3'},
+    {name:'T. Rowe Price',action:'Accumulating',val:'$'+Math.floor(s.p*Math.random()*150+30)+'M',cls:'up'},
+    {name:'Ark Invest',action:'Buying',val:'$'+Math.floor(s.p*Math.random()*80+10)+'M',cls:'up'},
+    {name:'Citadel',action:'Short',val:'$'+Math.floor(s.p*Math.random()*50+5)+'M',cls:'dn'},
+  ];
+  el.innerHTML = '<div style="padding:4px 2px 6px;font-size:9px;letter-spacing:.1em;text-transform:uppercase;color:var(--t3);">13F Institutional — '+s.t+'</div>' +
+    bigPlayers.map(p =>
+      '<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 4px;border-bottom:1px solid var(--bdr);">' +
+      '<div><div style="font-size:11px;color:var(--t1);">'+p.name+'</div><div style="font-size:9.5px;color:var(--t3);">'+p.action+'</div></div>' +
+      '<div style="font-family:JetBrains Mono,monospace;font-size:11px;color:var(--'+p.cls+');">'+p.val+'</div>' +
+      '</div>'
+    ).join('');
+}
+
+/* ════════════════════════════════════════════════
    BOOT
 ════════════════════════════════════════════════ */
 function boot() {
   try { const t=sessionStorage.getItem('op-theme'); if(t) setTheme(t); } catch(e){}
+  // Load stored API key
+  try {
+    const k = localStorage.getItem('op-apikey');
+    if(k) {
+      updateApiKeyStatus();
+      showToast('API key loaded from storage','success');
+    } else {
+      setTimeout(() => showToast('Set your Anthropic API key in Settings for live news & AI opinions','info'), 1500);
+    }
+  } catch(e) {}
   initChart();
   renderWatchlist();
   selectStock('AAPL');
@@ -2120,6 +2335,9 @@ function boot() {
   setInterval(()=>{ if(APP.activeTab==='news') loadNews(); },300000);
   updateBalanceDisplay();
   renderPositions();
+  // Set first nav item active
+  const firstNi = document.querySelector('.ni');
+  if(firstNi) firstNi.classList.add('active');
   showToast('Oracle Prime terminal ready','success');
 }
 

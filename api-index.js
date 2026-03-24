@@ -1,12 +1,11 @@
-// api/index.js — Oracle Prime unified API handler
-// Handles all /api/* routes in one serverless function
-// Deploy this single file + vercel.json + package.json alongside index.html
+// api/index.js — Oracle Prime unified API handler (CommonJS)
+// All /api/* routes handled by this single serverless function
 
 const FINNHUB = 'https://finnhub.io/api/v1';
 
 function key() {
   const k = process.env.FINNHUB_API_KEY;
-  if (!k) throw Object.assign(new Error('FINNHUB_API_KEY not set in Vercel environment variables'), { status: 500 });
+  if (!k) throw Object.assign(new Error('FINNHUB_API_KEY not set — add it in Vercel Dashboard → Settings → Environment Variables'), { status: 500 });
   return k;
 }
 
@@ -17,8 +16,8 @@ async function fh(path, params = {}) {
   const r = await fetch(url.toString(), { signal: AbortSignal.timeout(8000) });
   if (!r.ok) {
     const msg = await r.text().catch(() => '');
-    if (r.status === 429) throw Object.assign(new Error('Finnhub rate limit hit — wait 60s or upgrade plan at finnhub.io'), { status: 429 });
-    if (r.status === 403) throw Object.assign(new Error('Invalid Finnhub API key — check FINNHUB_API_KEY in Vercel env vars'), { status: 401 });
+    if (r.status === 429) throw Object.assign(new Error('Finnhub rate limit — wait 60s or upgrade plan at finnhub.io'), { status: 429 });
+    if (r.status === 403) throw Object.assign(new Error('Invalid Finnhub API key — check FINNHUB_API_KEY env var'), { status: 401 });
     throw Object.assign(new Error(`Finnhub ${r.status}: ${msg.slice(0, 120)}`), { status: 502 });
   }
   return r.json();
@@ -31,8 +30,6 @@ function timeAgo(unix) {
   if (ms < 86400000) return Math.floor(ms / 3600000) + 'h ago';
   return Math.floor(ms / 86400000) + 'd ago';
 }
-
-// ── Route handlers ────────────────────────────────────────────────────────────
 
 async function handleQuote(qs) {
   const sym = (qs.symbol || '').toUpperCase();
@@ -47,7 +44,7 @@ async function handleBatchQuotes(qs) {
   if (!syms.length) throw Object.assign(new Error('symbols required'), { status: 400 });
   const results = await Promise.allSettled(syms.map(s => fh('/quote', { symbol: s }).then(d => ({ s, d }))));
   const quotes = {};
-  results.forEach(r => {
+  results.forEach((r, i) => {
     if (r.status === 'fulfilled' && r.value.d.c) {
       const { s, d } = r.value;
       quotes[s] = { symbol: s, price: d.c, change: d.d, changePct: d.dp, high: d.h, low: d.l, open: d.o, prevClose: d.pc, timestamp: d.t };
@@ -61,11 +58,11 @@ async function handleCandles(qs) {
   const resMap = { '1m':'1','5m':'5','15m':'15','30m':'30','1h':'60','D':'D','W':'W','M':'M' };
   const res = resMap[qs.interval] || qs.resolution || 'D';
   const now = Math.floor(Date.now() / 1000);
-  const lookback = { '1': 86400, '5': 432000, '15': 864000, '30': 1728000, '60': 2592000, 'D': 31536000, 'W': 63072000, 'M': 157680000 };
+  const lookback = { '1':86400,'5':432000,'15':864000,'30':1728000,'60':2592000,'D':31536000,'W':63072000,'M':157680000 };
   const from = qs.from || String(now - (lookback[res] || 31536000));
   const to = qs.to || String(now);
   const d = await fh('/stock/candle', { symbol: sym, resolution: res, from, to });
-  if (d.s !== 'ok' || !d.c?.length) throw Object.assign(new Error(`No candle data for ${sym} at ${res}. Intraday bars require Finnhub paid plan.`), { status: 404 });
+  if (d.s !== 'ok' || !d.c || !d.c.length) throw Object.assign(new Error(`No candle data for ${sym} at ${res}. Intraday bars require Finnhub paid plan.`), { status: 404 });
   const candles = d.t.map((t, i) => ({ t: t * 1000, o: d.o[i], h: d.h[i], l: d.l[i], c: d.c[i], v: d.v[i] }));
   return { symbol: sym, resolution: res, candles, count: candles.length };
 }
@@ -101,13 +98,11 @@ async function handleMetrics(qs) {
   const p = pr.status === 'fulfilled' ? pr.value : {};
   return {
     symbol: sym, name: p.name || sym, exchange: p.exchange, industry: p.finnhubIndustry,
-    logo: p.logo, weburl: p.weburl, ipo: p.ipo,
-    marketCap: p.marketCapitalization, shares: p.shareOutstanding,
+    logo: p.logo, weburl: p.weburl, ipo: p.ipo, marketCap: p.marketCapitalization, shares: p.shareOutstanding,
     pe: m.peAnnual || m.peNTM, pb: m.pbAnnual, ps: m.psAnnual,
-    eps: m.epsNormalizedAnnual || m.epsAnnual || m.epsNTM,
-    bvps: m.bookValuePerShareAnnual, fcfps: m.freeCashFlowPerShareAnnual,
-    dividend: m.dividendPerShareAnnual, roe: m.roeAnnual, roa: m.roaAnnual,
-    netMargin: m.netMarginAnnual, grossMargin: m.grossMarginAnnual,
+    eps: m.epsNormalizedAnnual || m.epsAnnual || m.epsNTM, bvps: m.bookValuePerShareAnnual,
+    fcfps: m.freeCashFlowPerShareAnnual, dividend: m.dividendPerShareAnnual,
+    roe: m.roeAnnual, roa: m.roaAnnual, netMargin: m.netMarginAnnual, grossMargin: m.grossMarginAnnual,
     debtEquity: m.totalDebt_totalEquityAnnual, currentRatio: m.currentRatioAnnual,
     revenueGrowth: m.revenueGrowthTTMYoy || m.revenueGrowth3Y,
     high52: m['52WeekHigh'], low52: m['52WeekLow'], beta: m.beta,
@@ -142,8 +137,8 @@ async function handleRecommendations(qs) {
   const latest = Array.isArray(d) ? d[0] : null;
   if (!latest) throw Object.assign(new Error('No recommendation data'), { status: 404 });
   const total = (latest.buy||0)+(latest.hold||0)+(latest.sell||0)+(latest.strongBuy||0)+(latest.strongSell||0);
-  const consensus = total === 0 ? 'N/A' : (latest.strongBuy+latest.buy)/total > 0.6 ? 'Buy' : (latest.strongSell+latest.sell)/total > 0.4 ? 'Sell' : 'Hold';
-  return { symbol: sym, period: latest.period, strongBuy: latest.strongBuy||0, buy: latest.buy||0, hold: latest.hold||0, sell: latest.sell||0, strongSell: latest.strongSell||0, total, consensus };
+  return { symbol: sym, period: latest.period, strongBuy: latest.strongBuy||0, buy: latest.buy||0, hold: latest.hold||0, sell: latest.sell||0, strongSell: latest.strongSell||0, total,
+    consensus: total === 0 ? 'N/A' : (latest.strongBuy+latest.buy)/total > 0.6 ? 'Buy' : (latest.strongSell+latest.sell)/total > 0.4 ? 'Sell' : 'Hold' };
 }
 
 async function handleEarnings(qs) {
@@ -167,7 +162,6 @@ async function handleMarketStatus() {
   return { isOpen: d.isOpen, holiday: d.holiday || null, session: d.session || null, t: Date.now() };
 }
 
-// Simple in-memory rate limiter for ws-token
 const wsRequests = new Map();
 function wsRateLimited(ip) {
   const now = Date.now(), e = wsRequests.get(ip) || { n: 0, t: now };
@@ -178,25 +172,22 @@ function wsRateLimited(ip) {
 async function handleWsToken(req) {
   const ip = (req.headers['x-forwarded-for'] || '').split(',')[0] || 'unknown';
   if (wsRateLimited(ip)) throw Object.assign(new Error('Too many requests'), { status: 429 });
-  const token = key();
-  return { token, wsUrl: 'wss://ws.finnhub.io', expiresHint: Date.now() + 3600000 };
+  return { token: key(), wsUrl: 'wss://ws.finnhub.io', expiresHint: Date.now() + 3600000 };
 }
 
-// ── Cache seconds per route ───────────────────────────────────────────────────
 const CACHE = {
   quote: 15, 'batch-quotes': 15, candles: 60, news: 300, 'market-news': 300,
   metrics: 3600, search: 3600, insiders: 3600, recommendations: 21600,
   earnings: 21600, 'market-status': 60, 'ws-token': 0,
 };
 
-// ── Main handler ──────────────────────────────────────────────────────────────
-export default async function handler(req, res) {
+module.exports = async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
   if (req.method === 'OPTIONS') return res.status(200).end();
 
-  // Extract route from URL: /api/quote → 'quote', /api/batch-quotes → 'batch-quotes'
-  const route = (req.url || '').replace(/^\/api\//, '').split('?')[0].split('/')[0];
+  // Extract route: /api/quote → 'quote'
+  const route = (req.url || '').split('?')[0].replace(/^\/api\//, '').split('/')[0];
   const qs = req.query || {};
 
   const cacheSec = CACHE[route];
@@ -225,7 +216,6 @@ export default async function handler(req, res) {
     }
     return res.json(data);
   } catch (err) {
-    const status = err.status || 500;
-    return res.status(status).json({ error: err.message });
+    return res.status(err.status || 500).json({ error: err.message });
   }
-}
+};

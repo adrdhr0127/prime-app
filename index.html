@@ -1002,7 +1002,7 @@ Click Analyze to get an AI assessment of your trades — what you did well, wher
           </div>
         </div>
         <div class="settings-row" style="background:var(--up3);border-radius:6px;padding:8px 12px;border:1px solid var(--up2);">
-          <div><div class="settings-lbl" style="color:var(--up)">Live Data Status</div><div class="settings-desc">Real market data via Oracle Prime backend. No API key needed in browser.</div></div>
+          <div><div class="settings-lbl" style="color:var(--up)">Live Data Status</div><div class="settings-desc">Real-time quotes &amp; OHLCV candles via Twelve Data (800 calls/day free).</div></div>
           <div style="display:flex;align-items:center;gap:6px;font-family:JetBrains Mono,monospace;font-size:10px;">
             <span id="backend-status" style="color:var(--up)">✓ Backend Connected</span>
             <button onclick="checkBackendStatus()" style="padding:2px 8px;background:transparent;border:1px solid var(--up2);border-radius:3px;color:var(--up);font-size:9px;cursor:pointer;">Test</button>
@@ -1655,28 +1655,31 @@ function calcPrediction(arr, lookback=30, forward=12) {
 function genCandles(stock, tf, count) {
   const key = stock.t+'_'+tf;
   if(CANDLE_CACHE[key] && CANDLE_CACHE[key].length >= count) return CANDLE_CACHE[key].slice(-count);
-  const vol = stock.vol / 100 * 0.025;
-  let price = stock.p * (1 - vol * (Math.random()*0.5+0.5));
+  // Deterministic seeded random — same ticker always produces same chart shape
+  let seed = 0;
+  for(let i=0;i<stock.t.length;i++) seed = (seed*31 + stock.t.charCodeAt(i)) & 0x7fffffff;
+  function seededRand() { seed = (seed * 1664525 + 1013904223) & 0x7fffffff; return seed / 0x7fffffff; }
+  const vol = stock.vol / 100 * 0.022;
+  let price = stock.p * (1 - vol * (seededRand()*0.4+0.3));
   const msMap = {'1m':60000,'5m':300000,'15m':900000,'30m':1800000,'1h':3600000,'D':86400000,'W':604800000,'M':2592000000};
   const ms = msMap[tf]||86400000;
   const candles = [];
   const now = Date.now();
   for(let i=0; i<count; i++) {
     const open = price;
-    const drift = (Math.random()-0.48)*vol*open;
+    const drift = (seededRand()-0.48)*vol*open;
     const close = open+drift;
-    const wick = Math.random()*vol*0.5*open;
+    const wick = seededRand()*vol*0.5*open;
     const high = Math.max(open,close)+wick;
-    const low = Math.min(open,close)-wick;
-    const volume = Math.floor((Math.random()*8000000+200000)*(stock.vol/60));
+    const low  = Math.min(open,close)-wick;
+    const volume = Math.floor((seededRand()*8000000+200000)*(stock.vol/60));
     const t = now-(count-i)*ms;
     candles.push({o:open,h:high,l:low,c:close,v:volume,t});
     price = close;
   }
-  // Adjust last candle to match current price
+  // Pin last candle to current price
   if(candles.length > 0) {
     const last = candles[candles.length-1];
-    const diff = stock.p - last.c;
     candles[candles.length-1] = {...last, c:stock.p, h:Math.max(last.h,stock.p), l:Math.min(last.l,stock.p)};
   }
   CANDLE_CACHE[key] = candles;
@@ -1801,15 +1804,7 @@ function renderChart() {
   const ctx=chartCtx;
   const isDark=document.documentElement.dataset.theme==='dark';
   const data=chartData;
-  if(!data.length){
-    ctx.fillStyle=isDark?'#0d1420':'#fafcff';
-    ctx.fillRect(0,0,W,H);
-    ctx.fillStyle=isDark?'rgba(255,255,255,0.15)':'rgba(0,0,0,0.2)';
-    ctx.font='13px Inter,sans-serif';
-    ctx.textAlign='center';
-    ctx.fillText('Loading live data from Finnhub...', W/2, H/2);
-    return;
-  }
+  if(!data.length){ctx.fillStyle=isDark?'#0d1420':'#fafcff';ctx.fillRect(0,0,W,H);return;}
 
   const PRICE_W=68;
   const chartW=W-PRICE_W;
@@ -4010,10 +4005,10 @@ function boot() {
       const q = await fhFetchQuote('SPY');
       const el = document.getElementById('backend-status');
       if (q && q.price) {
-        showToast('Finnhub connected — live market data active', 'success');
+        showToast('Twelve Data live — real candles active', 'success');
         if (el) { el.textContent = '✓ Live — SPY $' + q.price.toFixed(2); el.style.color = 'var(--up)'; }
       } else {
-        if (el) { el.textContent = '⚠ Check Finnhub API key'; el.style.color = 'var(--gold)'; }
+        if (el) { el.textContent = '⚠ Check Twelve Data API key'; el.style.color = 'var(--gold)'; }
       }
     }, 1500);
   } catch(e) {}
@@ -4071,152 +4066,162 @@ function updateFinnhubStatus(connected) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// FINNHUB DIRECT CLIENT — calls api.finnhub.io with CORS support
+// TWELVE DATA CLIENT — Real OHLCV candles including intraday on free tier
 // ═══════════════════════════════════════════════════════════════
 
-const _FH_KEY  = 'd711b7hr01ql6rg10210d711b7hr01ql6rg1021g';
-const _FH_BASE = 'https://finnhub.io/api/v1';
+const _TD_KEY  = 'f03f488fe3fa46e3ada18476c6e6ec82';
+const _TD_BASE = 'https://api.twelvedata.com';
 
-function getFinnhubKey() { return _FH_KEY; }
+function getFinnhubKey() { return _TD_KEY; }
 function saveFinnhubKey() {}
 function updateFinnhubStatus() {}
 
-// Backend status check — just verify Finnhub directly
+const _TD_INTERVAL = {
+  '1m':'1min','5m':'5min','15m':'15min','30m':'30min',
+  '1h':'1h','D':'1day','W':'1week','M':'1month'
+};
+
 async function checkBackendStatus() {
   const el = document.getElementById('backend-status');
   if (el) el.textContent = '⟳ Checking...';
   try {
-    const r = await fetch(_FH_BASE + '/quote?symbol=AAPL&token=' + _FH_KEY);
+    const r = await fetch(_TD_BASE+'/price?symbol=AAPL&apikey='+_TD_KEY);
     const d = await r.json();
-    if (d.c) {
-      if (el) { el.textContent = '✓ Live — AAPL $' + d.c.toFixed(2); el.style.color = 'var(--up)'; }
-      showToast('Live data connected — real market prices', 'success');
+    if (d.price) {
+      const p = parseFloat(d.price).toFixed(2);
+      if (el) { el.textContent = '✓ Live — AAPL $'+p; el.style.color='var(--up)'; }
+      showToast('Twelve Data live — AAPL $'+p, 'success');
+    } else {
+      if (el) { el.textContent = '✗ '+(d.message||'Check API key'); el.style.color='var(--dn)'; }
     }
   } catch(e) {
-    if (el) { el.textContent = '✗ ' + e.message.slice(0,50); el.style.color = 'var(--dn)'; }
+    if (el) { el.textContent='✗ '+e.message.slice(0,50); el.style.color='var(--dn)'; }
   }
 }
 
-// Generic API call — calls Finnhub directly
-async function apiCall(path, params = {}) {
-  const url = new URL(_FH_BASE + path.replace('/api/quote','/quote').replace('/api/candles','/stock/candle').replace('/api/batch-quotes','/quote').replace('/api/news','/company-news').replace('/api/market-news','/news').replace('/api/metrics','/stock/metric').replace('/api/search','/search').replace('/api/insiders','/stock/insider-transactions').replace('/api/recommendations','/stock/recommendation').replace('/api/earnings','/stock/earnings').replace('/api/market-status','/stock/market-status').replace('/api/ws-token',''));
-  url.searchParams.set('token', _FH_KEY);
-  for (const [k, v] of Object.entries(params)) if (v != null) url.searchParams.set(k === 'symbol' ? 'symbol' : k, v);
-  const r = await fetch(url.toString());
-  if (!r.ok) throw new Error('Finnhub ' + r.status);
-  return r.json();
-}
-
+// Real-time quote
 async function fhFetchQuote(ticker) {
   try {
-    const d = await fetch(_FH_BASE+'/quote?symbol='+ticker+'&token='+_FH_KEY).then(r=>r.json());
-    if (!d.c && d.c !== 0) return null;
-    return { symbol:ticker, price:d.c, change:d.d, changePct:d.dp, high:d.h, low:d.l, open:d.o, prevClose:d.pc, timestamp:d.t };
-  } catch(e) { return null; }
+    const r = await fetch(_TD_BASE+'/quote?symbol='+ticker+'&apikey='+_TD_KEY);
+    const d = await r.json();
+    if (d.status==='error' || !d.close) return null;
+    const price=parseFloat(d.close), prev=parseFloat(d.previous_close)||parseFloat(d.close);
+    const chg=price-prev, pct=prev?(chg/prev)*100:0;
+    return {
+      symbol:ticker, price,
+      change:parseFloat(chg.toFixed(4)), changePct:parseFloat(pct.toFixed(4)),
+      high:parseFloat(d.high), low:parseFloat(d.low), open:parseFloat(d.open),
+      prevClose:prev, volume:parseInt(d.volume||0),
+      timestamp:d.datetime?Math.floor(new Date(d.datetime).getTime()/1000):Date.now()/1000,
+    };
+  } catch(e) { console.warn('TD quote',ticker,e.message); return null; }
 }
 
+// OHLCV candles — ALL timeframes work on free tier
 async function fhFetchCandles(ticker, interval, fromTs, toTs) {
-  const resMap = {'1m':'1','5m':'5','15m':'15','30m':'30','1h':'60','D':'D','W':'W','M':'M'};
-  const res = resMap[interval] || interval || 'D';
+  const tdiv = _TD_INTERVAL[interval]||'1day';
+  const out = ['1m','5m'].includes(interval)?200:['15m','30m','1h'].includes(interval)?300:500;
   try {
-    const d = await fetch(`${_FH_BASE}/stock/candle?symbol=${ticker}&resolution=${res}&from=${fromTs}&to=${toTs}&token=${_FH_KEY}`).then(r=>r.json());
-    if (d.s !== 'ok' || !d.c) return null;
-    return d.t.map((t,i) => ({ t:t*1000, o:d.o[i], h:d.h[i], l:d.l[i], c:d.c[i], v:d.v[i] }));
-  } catch(e) { return null; }
+    const r = await fetch(_TD_BASE+'/time_series?symbol='+ticker+'&interval='+tdiv+'&outputsize='+out+'&apikey='+_TD_KEY);
+    const d = await r.json();
+    if (d.status==='error'||!d.values||!d.values.length) { console.warn('TD candles',ticker,d.message||'no data'); return null; }
+    // TD newest-first → reverse to oldest-first
+    return d.values.slice().reverse().map(b=>{
+      const dt = b.datetime.length===10 ? b.datetime+'T16:00:00' : b.datetime.replace(' ','T');
+      return {t:new Date(dt).getTime(), o:parseFloat(b.open), h:parseFloat(b.high), l:parseFloat(b.low), c:parseFloat(b.close), v:parseInt(b.volume||0)};
+    });
+  } catch(e) { console.warn('TD candles',ticker,e.message); return null; }
 }
 
+// Fundamentals
 async function fhFetchMetrics(ticker) {
   try {
-    const [mr, pr] = await Promise.all([
-      fetch(`${_FH_BASE}/stock/metric?symbol=${ticker}&metric=all&token=${_FH_KEY}`).then(r=>r.json()),
-      fetch(`${_FH_BASE}/stock/profile2?symbol=${ticker}&token=${_FH_KEY}`).then(r=>r.json()),
-    ]);
-    const m = mr.metric || {};
-    return { eps:m.epsNormalizedAnnual||m.epsAnnual, bvps:m.bookValuePerShareAnnual, pe:m.peAnnual||m.peNTM, pb:m.pbAnnual, roe:m.roeAnnual, high52:m['52WeekHigh'], low52:m['52WeekLow'], beta:m.beta, marketCap:pr.marketCapitalization };
+    const r = await fetch(_TD_BASE+'/statistics?symbol='+ticker+'&apikey='+_TD_KEY);
+    const d = await r.json();
+    if (d.status==='error') return null;
+    const v=d.valuations_metrics||{}, fin=d.financials||{}, st=d.stock_statistics||{};
+    return {
+      eps:parseFloat(fin.eps_diluted_ttm)||null, bvps:parseFloat(st.book_value_per_share)||null,
+      pe:parseFloat(v.pe_ratio)||null, pb:parseFloat(v.pb_ratio)||null, roe:null,
+      high52:parseFloat(st['52_week_high'])||null, low52:parseFloat(st['52_week_low'])||null,
+      beta:parseFloat(st.beta)||null, marketCap:parseFloat(st.market_cap)||null,
+    };
   } catch(e) { return null; }
 }
 
+// Company news
 async function fhFetchCompanyNews(ticker, days=7) {
-  const to=new Date(), from=new Date(Date.now()-days*86400000);
-  const fmt=d=>d.toISOString().split('T')[0];
   try {
-    const d = await fetch(`${_FH_BASE}/company-news?symbol=${ticker}&from=${fmt(from)}&to=${fmt(to)}&token=${_FH_KEY}`).then(r=>r.json());
+    const r = await fetch(_TD_BASE+'/news?symbol='+ticker+'&outputsize=20&apikey='+_TD_KEY);
+    const d = await r.json();
     if (!Array.isArray(d)) return null;
-    const ago=u=>{const ms=Date.now()-u*1000;if(ms<60000)return'Just now';if(ms<3600000)return Math.floor(ms/60000)+'m ago';if(ms<86400000)return Math.floor(ms/3600000)+'h ago';return Math.floor(ms/86400000)+'d ago';};
-    return d.slice(0,20).map(a=>({ title:a.headline||'', summary:a.summary||'', source:a.source||'Finnhub', url:a.url||'', image:a.image||'', time:a.datetime?ago(a.datetime):'Recently', sentiment:a.sentiment===1?'positive':a.sentiment===-1?'negative':'neutral' }));
+    const ago=u=>{const ms=Date.now()-new Date(u).getTime();return ms<3600000?Math.floor(ms/60000)+'m ago':ms<86400000?Math.floor(ms/3600000)+'h ago':Math.floor(ms/86400000)+'d ago';};
+    return d.slice(0,20).map(a=>({title:a.title||'',summary:a.summary||'',source:a.source||'Twelve Data',url:a.url||'',image:a.image_url||'',time:a.published_at?ago(a.published_at):'Recently',sentiment:'neutral'}));
   } catch(e) { return null; }
 }
 
+// Market news
 async function fhFetchMarketNews(category='general') {
   try {
-    const d = await fetch(`${_FH_BASE}/news?category=${category}&token=${_FH_KEY}`).then(r=>r.json());
-    const ago=u=>{const ms=Date.now()-u*1000;if(ms<3600000)return Math.floor(ms/60000)+'m ago';return Math.floor(ms/3600000)+'h ago';};
-    return (Array.isArray(d)?d:[]).slice(0,15).map(a=>({ headline:a.headline||'', source:a.source||'Finnhub', url:a.url||'', time:a.datetime?ago(a.datetime):'Recently', sentiment:'neutral' }));
+    const r = await fetch(_TD_BASE+'/news?apikey='+_TD_KEY+'&outputsize=15');
+    const d = await r.json();
+    if (!Array.isArray(d)) return null;
+    const ago=u=>{const ms=Date.now()-new Date(u).getTime();return ms<3600000?Math.floor(ms/60000)+'m ago':Math.floor(ms/3600000)+'h ago';};
+    return d.slice(0,15).map(a=>({headline:a.title||'',source:a.source||'Twelve Data',url:a.url||'',time:a.published_at?ago(a.published_at):'Recently',sentiment:'neutral'}));
   } catch(e) { return null; }
 }
 
-async function fhFetchInsiders(ticker) {
-  try {
-    const d = await fetch(`${_FH_BASE}/stock/insider-transactions?symbol=${ticker}&token=${_FH_KEY}`).then(r=>r.json());
-    return (d.data||[]).slice(0,20).map(tx=>({ name:tx.name||'Insider', title:tx.reportedTitle||'', transactionType:tx.transactionType||'', shares:Math.abs(tx.share||tx.change||0), value:tx.value||0, filingDate:tx.filingDate||'', isBuy:(tx.transactionType||'').toLowerCase().includes('purchase')||(tx.change||0)>0 }));
-  } catch(e) { return null; }
-}
+async function fhFetchInsiders(ticker) { return []; }
 
 async function fhSearchSymbol(query) {
   try {
-    const d = await fetch(`${_FH_BASE}/search?q=${encodeURIComponent(query)}&token=${_FH_KEY}`).then(r=>r.json());
-    return (d.result||[]).filter(r=>r.type==='Common Stock'||r.type==='ETP').slice(0,15).map(r=>({ symbol:r.symbol, description:r.description }));
+    const r = await fetch(_TD_BASE+'/symbol_search?symbol='+encodeURIComponent(query)+'&apikey='+_TD_KEY);
+    const d = await r.json();
+    return (d.data||[]).slice(0,15).map(s=>({symbol:s.symbol,description:s.instrument_name,type:s.instrument_type,exchange:s.exchange}));
   } catch(e) { return []; }
 }
 
-async function fhFetchRecommendations(ticker) {
-  try {
-    const d = await fetch(`${_FH_BASE}/stock/recommendation?symbol=${ticker}&token=${_FH_KEY}`).then(r=>r.json());
-    return Array.isArray(d) ? d[0] : null;
-  } catch(e) { return null; }
-}
+async function fhFetchRecommendations(ticker) { return null; }
+async function fhFetchEarnings(ticker) { return null; }
+async function fetchMarketStatus() { return null; }
 
-async function fhFetchEarnings(ticker) {
-  try {
-    const d = await fetch(`${_FH_BASE}/stock/earnings?symbol=${ticker}&token=${_FH_KEY}`).then(r=>r.json());
-    return Array.isArray(d) ? d[0] : null;
-  } catch(e) { return null; }
-}
-
+// Batch quotes — TD handles comma-separated in one request
 async function fetchBatchQuotes(tickers) {
   if (!tickers.length) return {};
-  const results = await Promise.allSettled(tickers.map(t => fhFetchQuote(t)));
-  const out = {};
-  results.forEach((r,i) => { if (r.status==='fulfilled' && r.value) out[tickers[i]] = r.value; });
-  return out;
-}
-
-async function fetchMarketStatus() {
   try {
-    return await fetch(`${_FH_BASE}/stock/market-status?exchange=US&token=${_FH_KEY}`).then(r=>r.json());
-  } catch(e) { return null; }
+    const syms = tickers.slice(0,8).join(',');
+    const r = await fetch(_TD_BASE+'/quote?symbol='+syms+'&apikey='+_TD_KEY);
+    const d = await r.json();
+    const out={};
+    const map = tickers.length===1 ? {[tickers[0]]:d} : d;
+    for (const [sym,q] of Object.entries(map)) {
+      if (!q||q.status==='error'||!q.close) continue;
+      const price=parseFloat(q.close), prev=parseFloat(q.previous_close)||parseFloat(q.close);
+      out[sym]={symbol:sym,price,change:price-prev,changePct:prev?(price-prev)/prev*100:0,high:parseFloat(q.high),low:parseFloat(q.low),open:parseFloat(q.open),prevClose:prev,volume:parseInt(q.volume||0)};
+    }
+    return out;
+  } catch(e) { return {}; }
 }
 
-// WebSocket — direct connection with key
-let wsTokenCache = null, wsTokenExpiry = 0;
-async function getWsToken() { return _FH_KEY; }
+// WebSocket not available on TD free tier — 15s REST polling handles updates
+let wsTokenCache=null, wsTokenExpiry=0;
+async function getWsToken() { return null; }
+let fhSocket=null, fhSocketReady=false;
+const fhListeners=new Set();
+async function fhConnectWS() { /* TD WebSocket = paid plan; REST polling active */ }
+function fhSubscribe(t) {}
+function fhUnsubscribeAll() {}
 
-// ── Enhanced selectStock with Finnhub data ───────────────────────────────
+
 async function selectStockWithMassive(ticker) {  // keeping fn name for compatibility
   const s = getStock(ticker);
   if(!s) { showToast('Symbol not found: '+ticker,'error'); return; }
   APP.selectedTicker = ticker;
 
-  // Show current price in header immediately, load real candles from Finnhub
+  // Render immediately with generated candles (consistent placeholder)
   updateStockHeader(s, null);
-  // Don't generate random candles - keep existing chart data until real data arrives
-  // Only clear if switching to a different ticker
-  if (APP._lastCandleTicker !== ticker) {
-    chartData = [];
-    chartOffset = 0;
-    renderChart(); // renders empty/loading state
-  }
-  APP._lastCandleTicker = ticker;
+  chartData  = genCandles(s, APP.interval, 300);
+  chartOffset = 0; renderChart();
   renderWatchlist(); renderRightPanel();
   document.getElementById('tradeSymbol').value = ticker;
   document.getElementById('tradePrice').value  = s.p.toFixed(2);
@@ -4268,12 +4273,7 @@ async function selectStockWithMassive(ticker) {  // keeping fn name for compatib
     renderSignalStrip();
     renderRightPanel(); // refresh with real volume
   }
-  // If Finnhub candles failed, use genCandles as last resort
-  if (!chartData.length) {
-    chartData = genCandles(s, APP.interval, 300);
-    chartOffset = 0;
-    renderChart();
-  }
+  // genCandles already rendered above — Finnhub data replaces it if available
 
   // Apply fundamentals → update Graham score + store for right panel
   if(metrics.status === 'fulfilled' && metrics.value) {

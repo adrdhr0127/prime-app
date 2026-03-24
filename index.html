@@ -2533,28 +2533,94 @@ function selectStock(ticker) {
 const searchInput = document.getElementById('searchInput');
 const searchDrop = document.getElementById('searchDrop');
 
+let _searchTimer = null;
+
 searchInput.addEventListener('input', () => {
-  const q=searchInput.value.trim().toLowerCase();
-  if(!q) { searchDrop.classList.remove('open'); return; }
-  const matches=STOCKS.filter(s=>s.t.toLowerCase().startsWith(q)||s.n.toLowerCase().includes(q)).slice(0,10);
-  if(!matches.length) { searchDrop.classList.remove('open'); return; }
-  searchDrop.innerHTML=matches.map(s=>`
-    <div class="sd-item" data-ticker="${s.t}">
-      <div class="sd-item-l"><div class="sd-ticker">${s.t}</div><div class="sd-name">${escHtml(s.n)}</div></div>
-      <div><div class="sd-price ${s.c>=0?'up':'dn'} mono">$${s.p.toFixed(2)}</div><div class="sd-chg ${s.c>=0?'up':'dn'}">${s.c>=0?'+':''}${s.c.toFixed(2)}%</div></div>
-    </div>`).join('');
-  searchDrop.classList.add('open');
+  const q = searchInput.value.trim();
+  if (!q) { searchDrop.classList.remove('open'); return; }
+
+  // Show local matches instantly while remote search loads
+  const qL = q.toLowerCase();
+  const local = STOCKS.filter(s => s.t.toLowerCase().startsWith(qL) || s.n.toLowerCase().includes(qL)).slice(0, 5);
+  if (local.length) {
+    searchDrop.innerHTML = local.map(s => `
+      <div class="sd-item" data-ticker="${s.t}">
+        <div class="sd-item-l"><div class="sd-ticker">${s.t}</div><div class="sd-name">${escHtml(s.n)}</div></div>
+        <div><div class="sd-price ${s.c>=0?'up':'dn'} mono">$${s.p.toFixed(2)}</div><div class="sd-chg ${s.c>=0?'up':'dn'}">${s.c>=0?'+':''}${s.c.toFixed(2)}%</div></div>
+      </div>`).join('') + '<div style="padding:6px 12px;font-size:9.5px;color:var(--t4);border-top:1px solid var(--bdr)">Searching Twelve Data...</div>';
+    searchDrop.classList.add('open');
+  } else {
+    searchDrop.innerHTML = '<div style="padding:10px 12px;font-size:11px;color:var(--t3)">Searching Twelve Data...</div>';
+    searchDrop.classList.add('open');
+  }
+
+  // Debounce the live API search by 350ms
+  clearTimeout(_searchTimer);
+  _searchTimer = setTimeout(async () => {
+    if (searchInput.value.trim() !== q) return; // stale
+    const results = await fhSearchSymbol(q);
+    if (!results.length && !local.length) {
+      searchDrop.innerHTML = '<div style="padding:10px 12px;font-size:11px;color:var(--t3)">No results found</div>';
+      return;
+    }
+
+    // Merge: local matches first (with prices), then remote-only results
+    const localTickers = new Set(local.map(s => s.t));
+    const remoteOnly = results.filter(r => !localTickers.has(r.symbol)).slice(0, 10);
+
+    const localHTML = local.map(s => `
+      <div class="sd-item" data-ticker="${s.t}">
+        <div class="sd-item-l"><div class="sd-ticker">${s.t}</div><div class="sd-name">${escHtml(s.n)}</div></div>
+        <div><div class="sd-price ${s.c>=0?'up':'dn'} mono">$${s.p.toFixed(2)}</div><div class="sd-chg ${s.c>=0?'up':'dn'}">${s.c>=0?'+':''}${s.c.toFixed(2)}%</div></div>
+      </div>`).join('');
+
+    const remoteHTML = remoteOnly.map(r => `
+      <div class="sd-item sd-item-remote" data-ticker="${r.symbol}" data-name="${escHtml(r.description||r.symbol)}" data-exchange="${escHtml(r.exchange||'')}">
+        <div class="sd-item-l">
+          <div class="sd-ticker">${r.symbol}</div>
+          <div class="sd-name">${escHtml(r.description||'')} <span style="color:var(--t4);font-size:9px">${escHtml(r.exchange||'')}</span></div>
+        </div>
+        <div style="font-size:9px;color:var(--t3);padding-right:4px">${escHtml(r.type||'Stock')}</div>
+      </div>`).join('');
+
+    const divider = (localHTML && remoteHTML) ? '<div style="padding:4px 12px;font-size:8.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--t4);background:var(--bg2);border-top:1px solid var(--bdr)">All Markets</div>' : '';
+    searchDrop.innerHTML = localHTML + divider + remoteHTML;
+    if (localHTML || remoteHTML) searchDrop.classList.add('open');
+    else searchDrop.classList.remove('open');
+  }, 350);
 });
+
 searchDrop.addEventListener('click', e => {
-  const item=e.target.closest('[data-ticker]');
-  if(item) { selectStock(item.dataset.ticker); searchInput.value=''; searchDrop.classList.remove('open'); }
+  const item = e.target.closest('[data-ticker]');
+  if (!item) return;
+  const ticker = item.dataset.ticker;
+  // If it's a remote-only ticker not in STOCKS, add a minimal entry first
+  if (!getStock(ticker)) {
+    const name = item.dataset.name || ticker;
+    const exchange = item.dataset.exchange || '';
+    STOCKS.push({ t: ticker, n: name, p: 0, c: 0, sec: exchange, pe: null, eps: null, bv: null, vol: 50 });
+  }
+  selectStock(ticker);
+  searchInput.value = '';
+  searchDrop.classList.remove('open');
 });
-document.addEventListener('click', e => { if(!searchInput.contains(e.target)&&!searchDrop.contains(e.target)) searchDrop.classList.remove('open'); });
+
+document.addEventListener('click', e => {
+  if (!searchInput.contains(e.target) && !searchDrop.contains(e.target)) searchDrop.classList.remove('open');
+});
+
 searchInput.addEventListener('keydown', e => {
-  if(e.key==='Enter') {
-    const q=searchInput.value.trim().toUpperCase();
-    const s=getStock(q);
-    if(s) { selectStock(q); searchInput.value=''; searchDrop.classList.remove('open'); }
+  if (e.key === 'Enter') {
+    const q = searchInput.value.trim().toUpperCase();
+    // Try local first, then treat as raw ticker
+    const s = getStock(q);
+    if (s) {
+      selectStock(q); searchInput.value = ''; searchDrop.classList.remove('open');
+    } else if (q.length >= 1) {
+      // Add as unknown ticker and load via Twelve Data
+      STOCKS.push({ t: q, n: q, p: 0, c: 0, sec: 'Unknown', pe: null, eps: null, bv: null, vol: 50 });
+      selectStock(q); searchInput.value = ''; searchDrop.classList.remove('open');
+    }
   }
 });
 
@@ -4214,8 +4280,12 @@ function fhUnsubscribeAll() {}
 
 
 async function selectStockWithMassive(ticker) {  // keeping fn name for compatibility
-  const s = getStock(ticker);
-  if(!s) { showToast('Symbol not found: '+ticker,'error'); return; }
+  let s = getStock(ticker);
+  // Handle any ticker not in local STOCKS (from universal search or direct entry)
+  if (!s) {
+    STOCKS.push({ t: ticker, n: ticker, p: 0, c: 0, sec: '—', pe: null, eps: null, bv: null, vol: 50 });
+    s = getStock(ticker);
+  }
   APP.selectedTicker = ticker;
 
   // Render immediately with generated candles (consistent placeholder)
@@ -4302,7 +4372,7 @@ function updateStockHeader(s, quote) {
   document.getElementById('sh-ticker').textContent     = s.t;
   document.getElementById('sh-exchange').textContent   = s.sec;
   const priceEl = document.getElementById('sh-price');
-  priceEl.textContent = '$'+s.p.toFixed(s.p<10?3:2);
+  priceEl.textContent = s.p > 0 ? ('$'+s.p.toFixed(s.p<10?3:2)) : 'Loading...';
   priceEl.className   = 'sh-price '+(s.c>=0?'up':'dn');
   const chgEl = document.getElementById('sh-change');
   chgEl.textContent = (s.c>=0?'+':'')+s.c.toFixed(2)+'%';
@@ -4624,22 +4694,23 @@ function startLivePricesEnhanced() {
       const tradePriceEl = document.getElementById('tradePrice');
       if (tradePriceEl) tradePriceEl.value = cur.p.toFixed(2);
     }
+    // Update stock header price live
+    const cur2 = getStock(APP.selectedTicker);
+    if (cur2) {
+      const priceEl = document.getElementById('sh-price');
+      const changeEl = document.getElementById('sh-change');
+      if (priceEl) { priceEl.textContent = '$' + cur2.p.toFixed(cur2.p < 10 ? 3 : 2); priceEl.className = 'sh-price ' + (cur2.c >= 0 ? 'up' : 'dn'); }
+      if (changeEl) { changeEl.textContent = (cur2.c >= 0 ? '+' : '') + cur2.c.toFixed(2) + '%'; changeEl.className = 'sh-change ' + (cur2.c >= 0 ? 'up' : 'dn'); }
+    }
     renderWatchlist();
     updateBalanceDisplay();
-    // If quotes tab is visible, update the bottom-left price live
-    if(APP.activeRP === 'quotes') {
-      const rpPrice = document.getElementById('rp-live-price');
-      const cur2 = getStock(APP.selectedTicker);
-      if(rpPrice && cur2) {
-        rpPrice.textContent = '$' + cur2.p.toFixed(2);
-        rpPrice.className = 'qps-price ' + (cur2.c >= 0 ? 'up' : 'dn');
-      }
-    }
+    // Re-render the quotes panel (bottom-left) with latest price
+    if (APP.activeRP === 'quotes') renderRightPanel();
   }
 
-  // Run immediately, then every 15 seconds
+  // Run immediately on boot, then every 15 seconds
   refreshQuotes();
-  const quoteIv = setInterval(refreshQuotes, 15000);
+  const quoteIv = setInterval(refreshQuotes, 10000); // every 10s
   APP._intervals.push(quoteIv);
 
   // ── WebSocket for real-time trade streaming ───────────────────────────
@@ -4651,8 +4722,11 @@ function startLivePricesEnhanced() {
     if (cur) {
       const priceEl = document.getElementById('sh-price');
       const changeEl = document.getElementById('sh-change');
-      if (priceEl) priceEl.textContent = '$' + cur.p.toFixed(cur.p < 10 ? 3 : 2);
+      if (priceEl) { priceEl.textContent = '$' + cur.p.toFixed(cur.p < 10 ? 3 : 2); priceEl.className = 'sh-price ' + (cur.c >= 0 ? 'up' : 'dn'); }
       if (changeEl) { changeEl.textContent = (cur.c >= 0 ? '+' : '') + cur.c.toFixed(2) + '%'; changeEl.className = 'sh-change ' + (cur.c >= 0 ? 'up' : 'dn'); }
+      // Keep bottom-left price in sync too
+      const rpPrice = document.getElementById('rp-live-price');
+      if (rpPrice) { rpPrice.textContent = '$' + cur.p.toFixed(cur.p < 10 ? 3 : 2); rpPrice.className = 'qps-price ' + (cur.c >= 0 ? 'up' : 'dn'); }
     }
     // Update index bar
     ['SPY','QQQ','DIA'].forEach(t => {

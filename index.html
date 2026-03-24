@@ -3994,17 +3994,13 @@ function boot() {
     if(ak) updateApiKeyStatus();
     // Backend provides all data - check it's alive
     setTimeout(async () => {
-      try {
-        const q = await apiCall('/api/quote', { symbol: 'SPY' });
-        if (q.price) {
-          showToast('Live data connected — real market prices loading', 'success');
-          const el = document.getElementById('backend-status');
-          if (el) { el.textContent = '✓ Live — SPY $' + q.price.toFixed(2); el.style.color = 'var(--up)'; }
-        }
-      } catch(e) {
-        showToast('Backend offline — check Vercel env vars', 'error');
-        const el = document.getElementById('backend-status');
-        if (el) { el.textContent = '✗ ' + e.message.slice(0,50); el.style.color = 'var(--dn)'; }
+      const q = await fhFetchQuote('SPY');
+      const el = document.getElementById('backend-status');
+      if (q && q.price) {
+        showToast('Finnhub connected — live market data active', 'success');
+        if (el) { el.textContent = '✓ Live — SPY $' + q.price.toFixed(2); el.style.color = 'var(--up)'; }
+      } else {
+        if (el) { el.textContent = '⚠ Check Finnhub API key'; el.style.color = 'var(--gold)'; }
       }
     }, 1500);
   } catch(e) {}
@@ -4061,246 +4057,135 @@ function updateFinnhubStatus(connected) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// ORACLE PRIME BACKEND CLIENT
-// All data fetched from /api/* routes (Finnhub key is server-side)
+// FINNHUB DIRECT CLIENT — calls api.finnhub.io with CORS support
 // ═══════════════════════════════════════════════════════════════
 
-const API_BASE = ''; // Same origin - /api/* routes handled by Vercel
+const _FH_KEY  = 'd711b7hr01ql6rg10210d711b7hr01ql6rg1021g';
+const _FH_BASE = 'https://finnhub.io/api/v1';
 
-// Generic API call with error handling
-async function apiCall(path, params = {}) {
-  const url = new URL(path, window.location.origin);
-  for (const [k, v] of Object.entries(params)) {
-    if (v !== undefined && v !== null) url.searchParams.set(k, v);
-  }
-  const res = await fetch(url.toString());
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ error: 'Server error ' + res.status }));
-    throw new Error(err.error || 'API error ' + res.status);
-  }
-  return res.json();
-}
+function getFinnhubKey() { return _FH_KEY; }
+function saveFinnhubKey() {}
+function updateFinnhubStatus() {}
 
-// Check backend health
+// Backend status check — just verify Finnhub directly
 async function checkBackendStatus() {
   const el = document.getElementById('backend-status');
   if (el) el.textContent = '⟳ Checking...';
   try {
-    const data = await apiCall('/api/quote', { symbol: 'AAPL' });
-    if (data.price) {
-      if (el) { el.textContent = '✓ Live — AAPL $' + data.price.toFixed(2); el.style.color = 'var(--up)'; }
-      showToast('Backend live — real data flowing', 'success');
+    const r = await fetch(_FH_BASE + '/quote?symbol=AAPL&token=' + _FH_KEY);
+    const d = await r.json();
+    if (d.c) {
+      if (el) { el.textContent = '✓ Live — AAPL $' + d.c.toFixed(2); el.style.color = 'var(--up)'; }
+      showToast('Live data connected — real market prices', 'success');
     }
   } catch(e) {
-    if (el) { el.textContent = '✗ Error: ' + e.message.slice(0, 60); el.style.color = 'var(--dn)'; }
-    showToast('Backend error: ' + e.message.slice(0, 80), 'error');
+    if (el) { el.textContent = '✗ ' + e.message.slice(0,50); el.style.color = 'var(--dn)'; }
   }
 }
 
-// ── Real-time quote ───────────────────────────────────────────
+// Generic API call — calls Finnhub directly
+async function apiCall(path, params = {}) {
+  const url = new URL(_FH_BASE + path.replace('/api/quote','/quote').replace('/api/candles','/stock/candle').replace('/api/batch-quotes','/quote').replace('/api/news','/company-news').replace('/api/market-news','/news').replace('/api/metrics','/stock/metric').replace('/api/search','/search').replace('/api/insiders','/stock/insider-transactions').replace('/api/recommendations','/stock/recommendation').replace('/api/earnings','/stock/earnings').replace('/api/market-status','/stock/market-status').replace('/api/ws-token',''));
+  url.searchParams.set('token', _FH_KEY);
+  for (const [k, v] of Object.entries(params)) if (v != null) url.searchParams.set(k === 'symbol' ? 'symbol' : k, v);
+  const r = await fetch(url.toString());
+  if (!r.ok) throw new Error('Finnhub ' + r.status);
+  return r.json();
+}
+
 async function fhFetchQuote(ticker) {
   try {
-    const d = await apiCall('/api/quote', { symbol: ticker });
-    return d.price ? d : null;
-  } catch(e) { console.warn('Quote error:', e.message); return null; }
+    const d = await fetch(_FH_BASE+'/quote?symbol='+ticker+'&token='+_FH_KEY).then(r=>r.json());
+    if (!d.c && d.c !== 0) return null;
+    return { symbol:ticker, price:d.c, change:d.d, changePct:d.dp, high:d.h, low:d.l, open:d.o, prevClose:d.pc, timestamp:d.t };
+  } catch(e) { return null; }
 }
 
-// ── OHLCV Candles ─────────────────────────────────────────────
 async function fhFetchCandles(ticker, interval, fromTs, toTs) {
+  const resMap = {'1m':'1','5m':'5','15m':'15','30m':'30','1h':'60','D':'D','W':'W','M':'M'};
+  const res = resMap[interval] || interval || 'D';
   try {
-    const d = await apiCall('/api/candles', {
-      symbol:     ticker,
-      interval:   interval,
-      from:       fromTs,
-      to:         toTs,
-    });
-    return d.candles && d.candles.length ? d.candles : null;
-  } catch(e) { console.warn('Candles error:', e.message); return null; }
+    const d = await fetch(`${_FH_BASE}/stock/candle?symbol=${ticker}&resolution=${res}&from=${fromTs}&to=${toTs}&token=${_FH_KEY}`).then(r=>r.json());
+    if (d.s !== 'ok' || !d.c) return null;
+    return d.t.map((t,i) => ({ t:t*1000, o:d.o[i], h:d.h[i], l:d.l[i], c:d.c[i], v:d.v[i] }));
+  } catch(e) { return null; }
 }
 
-// ── Fundamentals / Metrics ────────────────────────────────────
 async function fhFetchMetrics(ticker) {
   try {
-    const d = await apiCall('/api/metrics', { symbol: ticker });
-    return {
-      eps:  d.eps,   bvps: d.bvps,
-      pe:   d.pe,    pb:   d.pb,
-      roe:  d.roe,   high52: d.high52, low52: d.low52,
-      beta: d.beta,  marketCap: d.marketCap,
-    };
-  } catch(e) { console.warn('Metrics error:', e.message); return null; }
+    const [mr, pr] = await Promise.all([
+      fetch(`${_FH_BASE}/stock/metric?symbol=${ticker}&metric=all&token=${_FH_KEY}`).then(r=>r.json()),
+      fetch(`${_FH_BASE}/stock/profile2?symbol=${ticker}&token=${_FH_KEY}`).then(r=>r.json()),
+    ]);
+    const m = mr.metric || {};
+    return { eps:m.epsNormalizedAnnual||m.epsAnnual, bvps:m.bookValuePerShareAnnual, pe:m.peAnnual||m.peNTM, pb:m.pbAnnual, roe:m.roeAnnual, high52:m['52WeekHigh'], low52:m['52WeekLow'], beta:m.beta, marketCap:pr.marketCapitalization };
+  } catch(e) { return null; }
 }
 
-// ── Company News ──────────────────────────────────────────────
-async function fhFetchCompanyNews(ticker, days = 7) {
+async function fhFetchCompanyNews(ticker, days=7) {
+  const to=new Date(), from=new Date(Date.now()-days*86400000);
+  const fmt=d=>d.toISOString().split('T')[0];
   try {
-    const d = await apiCall('/api/news', { symbol: ticker, days });
-    if (!d.articles || !d.articles.length) return null;
-    return d.articles.map(a => ({
-      title:     a.title,
-      summary:   a.summary,
-      source:    a.source,
-      url:       a.url,
-      time:      a.time,
-      sentiment: a.sentiment,
-      image:     a.image,
-    }));
-  } catch(e) { console.warn('News error:', e.message); return null; }
+    const d = await fetch(`${_FH_BASE}/company-news?symbol=${ticker}&from=${fmt(from)}&to=${fmt(to)}&token=${_FH_KEY}`).then(r=>r.json());
+    if (!Array.isArray(d)) return null;
+    const ago=u=>{const ms=Date.now()-u*1000;if(ms<60000)return'Just now';if(ms<3600000)return Math.floor(ms/60000)+'m ago';if(ms<86400000)return Math.floor(ms/3600000)+'h ago';return Math.floor(ms/86400000)+'d ago';};
+    return d.slice(0,20).map(a=>({ title:a.headline||'', summary:a.summary||'', source:a.source||'Finnhub', url:a.url||'', image:a.image||'', time:a.datetime?ago(a.datetime):'Recently', sentiment:a.sentiment===1?'positive':a.sentiment===-1?'negative':'neutral' }));
+  } catch(e) { return null; }
 }
 
-// ── General Market News ───────────────────────────────────────
-async function fhFetchMarketNews(category = 'general') {
+async function fhFetchMarketNews(category='general') {
   try {
-    const d = await apiCall('/api/market-news', { category, limit: 15 });
-    return d.articles ? d.articles.map(a => ({
-      headline:  a.headline,
-      source:    a.source,
-      url:       a.url,
-      time:      a.time,
-      sentiment: a.sentiment || 'neutral',
-    })) : null;
-  } catch(e) { console.warn('Market news error:', e.message); return null; }
+    const d = await fetch(`${_FH_BASE}/news?category=${category}&token=${_FH_KEY}`).then(r=>r.json());
+    const ago=u=>{const ms=Date.now()-u*1000;if(ms<3600000)return Math.floor(ms/60000)+'m ago';return Math.floor(ms/3600000)+'h ago';};
+    return (Array.isArray(d)?d:[]).slice(0,15).map(a=>({ headline:a.headline||'', source:a.source||'Finnhub', url:a.url||'', time:a.datetime?ago(a.datetime):'Recently', sentiment:'neutral' }));
+  } catch(e) { return null; }
 }
 
-// ── Insider Transactions ──────────────────────────────────────
 async function fhFetchInsiders(ticker) {
   try {
-    const d = await apiCall('/api/insiders', { symbol: ticker });
-    return d.transactions || null;
-  } catch(e) { console.warn('Insiders error:', e.message); return null; }
+    const d = await fetch(`${_FH_BASE}/stock/insider-transactions?symbol=${ticker}&token=${_FH_KEY}`).then(r=>r.json());
+    return (d.data||[]).slice(0,20).map(tx=>({ name:tx.name||'Insider', title:tx.reportedTitle||'', transactionType:tx.transactionType||'', shares:Math.abs(tx.share||tx.change||0), value:tx.value||0, filingDate:tx.filingDate||'', isBuy:(tx.transactionType||'').toLowerCase().includes('purchase')||(tx.change||0)>0 }));
+  } catch(e) { return null; }
 }
 
-// ── Symbol Search ─────────────────────────────────────────────
 async function fhSearchSymbol(query) {
   try {
-    const d = await apiCall('/api/search', { q: query });
-    return d.results || [];
+    const d = await fetch(`${_FH_BASE}/search?q=${encodeURIComponent(query)}&token=${_FH_KEY}`).then(r=>r.json());
+    return (d.result||[]).filter(r=>r.type==='Common Stock'||r.type==='ETP').slice(0,15).map(r=>({ symbol:r.symbol, description:r.description }));
   } catch(e) { return []; }
 }
 
-// ── Analyst Recommendations ───────────────────────────────────
 async function fhFetchRecommendations(ticker) {
   try {
-    return await apiCall('/api/recommendations', { symbol: ticker });
+    const d = await fetch(`${_FH_BASE}/stock/recommendation?symbol=${ticker}&token=${_FH_KEY}`).then(r=>r.json());
+    return Array.isArray(d) ? d[0] : null;
   } catch(e) { return null; }
 }
 
-// ── Earnings Data ─────────────────────────────────────────────
 async function fhFetchEarnings(ticker) {
   try {
-    const d = await apiCall('/api/earnings', { symbol: ticker });
-    return d.next || (d.history && d.history[0]) || null;
+    const d = await fetch(`${_FH_BASE}/stock/earnings?symbol=${ticker}&token=${_FH_KEY}`).then(r=>r.json());
+    return Array.isArray(d) ? d[0] : null;
   } catch(e) { return null; }
 }
 
-// ── Market Status ──────────────────────────────────────────────
-async function fetchMarketStatus() {
-  try {
-    return await apiCall('/api/market-status');
-  } catch(e) { return null; }
-}
-
-// ── Batch Quote Updates for Watchlist ────────────────────────
-// Fetches multiple quotes in one backend call
 async function fetchBatchQuotes(tickers) {
   if (!tickers.length) return {};
+  const results = await Promise.allSettled(tickers.map(t => fhFetchQuote(t)));
+  const out = {};
+  results.forEach((r,i) => { if (r.status==='fulfilled' && r.value) out[tickers[i]] = r.value; });
+  return out;
+}
+
+async function fetchMarketStatus() {
   try {
-    return await apiCall('/api/batch-quotes', { symbols: tickers.join(',') });
-  } catch(e) { console.warn('Batch quote error:', e.message); return {}; }
+    return await fetch(`${_FH_BASE}/stock/market-status?exchange=US&token=${_FH_KEY}`).then(r=>r.json());
+  } catch(e) { return null; }
 }
 
-// ── WebSocket: Connect via server-issued token ─────────────────
-let wsTokenCache = null;
-let wsTokenExpiry = 0;
-
-async function getWsToken() {
-  if (wsTokenCache && Date.now() < wsTokenExpiry) return wsTokenCache;
-  try {
-    const d = await apiCall('/api/ws-token');
-    wsTokenCache = d.token;
-    wsTokenExpiry = d.expiresHint || (Date.now() + 3600000);
-    return d.token;
-  } catch(e) { console.error('WS token error:', e.message); return null; }
-}
-
-let fhSocket = null;
-let fhSocketReady = false;
-const fhListeners = new Set();
-
-async function fhConnectWS() {
-  const token = await getWsToken();
-  if (!token) {
-    showToast('WebSocket unavailable — using REST polling', 'info');
-    return;
-  }
-  if (fhSocket && fhSocket.readyState < 2) return;
-
-  fhSocket = new WebSocket('wss://ws.finnhub.io?token=' + token);
-
-  fhSocket.addEventListener('open', () => {
-    fhSocketReady = true;
-    console.log('[WS] Connected to Finnhub');
-    showToast('Live streaming connected', 'success');
-    const subs = [...new Set([APP.selectedTicker, ...APP.watchlist])];
-    fhSubscribe(subs);
-  });
-
-  fhSocket.addEventListener('message', e => {
-    try {
-      const msg = JSON.parse(e.data);
-      if (msg.type === 'trade' && msg.data) {
-        msg.data.forEach(trade => {
-          const s = getStock(trade.s);
-          if (!s) return;
-          s.p = trade.p;
-          if (s._open) s.c = parseFloat(((s.p - s._open) / s._open * 100).toFixed(2));
-          if (trade.s === APP.selectedTicker && chartData.length) {
-            const last = chartData[chartData.length - 1];
-            const barMs = intervalMs(APP.interval);
-            if (trade.t - last.t < barMs) {
-              last.c = trade.p;
-              last.h = Math.max(last.h, trade.p);
-              last.l = Math.min(last.l, trade.p);
-              last.v += trade.v || 0;
-            } else {
-              chartData.push({ o: trade.p, h: trade.p, l: trade.p, c: trade.p, v: trade.v || 0, t: trade.t });
-            }
-          }
-        });
-      }
-      if (msg.type === 'ping') fhSocket.send(JSON.stringify({ type: 'pong' }));
-    } catch(err) {}
-  });
-
-  fhSocket.addEventListener('close', () => {
-    fhSocketReady = false;
-    wsTokenCache = null; // Force re-fetch token on reconnect
-    setTimeout(fhConnectWS, 5000);
-  });
-
-  fhSocket.addEventListener('error', () => { fhSocketReady = false; });
-}
-
-function fhSubscribe(tickers) {
-  if (!fhSocket || !fhSocketReady) return;
-  tickers.forEach(t => {
-    if (!fhListeners.has(t)) {
-      fhSocket.send(JSON.stringify({ type: 'subscribe', symbol: t }));
-      fhListeners.add(t);
-    }
-  });
-}
-
-function fhUnsubscribeAll() {
-  if (!fhSocket || !fhSocketReady) return;
-  fhListeners.forEach(t => fhSocket.send(JSON.stringify({ type: 'unsubscribe', symbol: t })));
-  fhListeners.clear();
-}
-
-// Legacy stub — key now lives server-side
-function getFinnhubKey() { return '<<server-side>>'; }
-function saveFinnhubKey() { showToast('API key is managed server-side in Vercel env vars', 'info'); }
-function updateFinnhubStatus() {}
+// WebSocket — direct connection with key
+let wsTokenCache = null, wsTokenExpiry = 0;
+async function getWsToken() { return _FH_KEY; }
 
 // ── Enhanced selectStock with Finnhub data ───────────────────────────────
 async function selectStockWithMassive(ticker) {  // keeping fn name for compatibility
@@ -4321,7 +4206,7 @@ async function selectStockWithMassive(ticker) {  // keeping fn name for compatib
   if(fhSocketReady) fhSubscribe([ticker]);
 
   const key = getFinnhubKey();
-  if(!key) return; // No Finnhub key — stay on simulation
+  // Always fetch real data
 
   // Parallel: quote + candles + metrics
   const now   = Math.floor(Date.now() / 1000);
@@ -4416,8 +4301,7 @@ async function loadNewsMassive() {  // keeping fn name for compatibility
   el.innerHTML = '<div class="news-loading"><span class="spin"></span> Loading news...</div>';
 
   // Try Finnhub first (no AI tokens used)
-  const fhKey = getFinnhubKey();
-  if(fhKey) {
+  {
     const items = await fhFetchCompanyNews(t, 7);
     if(items && items.length) {
       NEWS_CACHE[t] = {items, ts: Date.now()};
@@ -4442,8 +4326,7 @@ async function loadSidebarNewsFinnhub() {
     renderSidebarNews(el, SIDEBAR_NEWS_CACHE.items); return;
   }
   el.innerHTML = '<div style="padding:12px;color:var(--t3);font-size:11px;text-align:center;"><span class="spin"></span> Loading...</div>';
-  const fhKey = getFinnhubKey();
-  if(fhKey) {
+  {
     const items = await fhFetchMarketNews('general');
     if(items && items.length) {
       SIDEBAR_NEWS_CACHE.items = items;
@@ -4461,7 +4344,7 @@ async function renderSmartMoneyFinnhub() {
   const el=document.getElementById('smartPanel'); if(!el) return;
   const s=getStock(APP.selectedTicker)||getStock('AAPL');
   el.innerHTML='<div style="padding:14px;color:var(--t3);font-size:11px;text-align:center;"><span class="spin"></span> Loading smart money + options flow...</div>';
-  const fhKey=getFinnhubKey();
+  const fhKey=true;
 
   // ── GENERATE OPTIONS FLOW DATA ─────────────────────────────
   // Real unusual options flow from Finnhub (premium) or enriched simulation
@@ -4498,7 +4381,7 @@ async function renderSmartMoneyFinnhub() {
 
   // ── FETCH REAL INSIDER DATA ────────────────────────────────
   let insiderHtml='<div style="padding:8px;color:var(--t3);font-size:11px;">Finnhub key required for live insider data.</div>';
-  if(fhKey){
+  {
     const ins=await fhFetchInsiders(s.t);
     if(ins&&ins.length){
       insiderHtml=ins.slice(0,8).map(tx=>{
@@ -4662,7 +4545,7 @@ async function renderSmartMoneyFinnhub() {
     <div style="padding:10px 14px;">
       <div style="font-size:9px;letter-spacing:.12em;text-transform:uppercase;color:var(--t3);margin-bottom:6px;display:flex;justify-content:space-between;">
         <span>Insider Transactions (Form 4)</span>
-        <span class="pill ${fhKey?'pill-up':'pill-gold'}">${fhKey?'Live Finnhub':'Demo'}</span>
+        <span class="pill pill-up">Live Finnhub</span>
       </div>
       ${insiderHtml}
     </div>

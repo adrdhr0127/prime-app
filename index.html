@@ -4288,10 +4288,15 @@ async function selectStockWithMassive(ticker) {  // keeping fn name for compatib
   }
   APP.selectedTicker = ticker;
 
-  // Render immediately with generated candles (consistent placeholder)
+  // Render header immediately; only show placeholder candles if we have a real price
   updateStockHeader(s, null);
-  chartData  = genCandles(s, APP.interval, 300);
-  chartOffset = 0; renderChart();
+  if (s.p > 0) {
+    chartData  = genCandles(s, APP.interval, 300);
+    chartOffset = 0; renderChart();
+  } else {
+    // Unknown ticker — clear chart, real data will populate it
+    chartData = []; chartOffset = 0; renderChart();
+  }
   renderWatchlist(); renderRightPanel();
   document.getElementById('tradeSymbol').value = ticker;
   document.getElementById('tradePrice').value  = s.p.toFixed(2);
@@ -4324,7 +4329,12 @@ async function selectStockWithMassive(ticker) {  // keeping fn name for compatib
     const tradePriceEl = document.getElementById('tradePrice');
     if(tradePriceEl) tradePriceEl.value = s.p.toFixed(2);
     updateTradeEstimate();
-    // Re-render right panel with real price (fixes bottom-left stale price)
+    // If chart was blank (unknown ticker with p=0), now render placeholder with real price
+    if (!chartData.length && s.p > 0) {
+      chartData = genCandles(s, APP.interval, 300);
+      chartOffset = 0; renderChart();
+    }
+    // Re-render right panel with real price
     renderRightPanel();
     renderWatchlist();
   }
@@ -4694,18 +4704,29 @@ function startLivePricesEnhanced() {
       const tradePriceEl = document.getElementById('tradePrice');
       if (tradePriceEl) tradePriceEl.value = cur.p.toFixed(2);
     }
-    // Update stock header price live
+    // After fetching quotes, update ALL UI with fresh prices
     const cur2 = getStock(APP.selectedTicker);
-    if (cur2) {
+    if (cur2 && cur2.p > 0) {
+      // Update stock header
       const priceEl = document.getElementById('sh-price');
       const changeEl = document.getElementById('sh-change');
+      const exchEl = document.getElementById('sh-exchange');
       if (priceEl) { priceEl.textContent = '$' + cur2.p.toFixed(cur2.p < 10 ? 3 : 2); priceEl.className = 'sh-price ' + (cur2.c >= 0 ? 'up' : 'dn'); }
       if (changeEl) { changeEl.textContent = (cur2.c >= 0 ? '+' : '') + cur2.c.toFixed(2) + '%'; changeEl.className = 'sh-change ' + (cur2.c >= 0 ? 'up' : 'dn'); }
+      // Update OHLCV row in header
+      if (cur2._open) {
+        document.getElementById('sh-ohlcv').innerHTML = [
+          ['Open',  '$'+(cur2._open||cur2.p).toFixed(2)],
+          ['High',  '$'+(cur2._high||cur2.p).toFixed(2)],
+          ['Low',   '$'+(cur2._low||cur2.p).toFixed(2)],
+          ['Vol',   cur2._vol || '—'],
+        ].map(([l,v]) => `<div class="sh-stat"><div class="sh-stat-l">${l}</div><div class="sh-stat-v mono">${v}</div></div>`).join('');
+      }
     }
     renderWatchlist();
     updateBalanceDisplay();
-    // Re-render the quotes panel (bottom-left) with latest price
-    if (APP.activeRP === 'quotes') renderRightPanel();
+    // Always re-render the bottom-left quotes panel
+    renderRightPanel();
   }
 
   // Run immediately on boot, then every 15 seconds
@@ -4724,9 +4745,14 @@ function startLivePricesEnhanced() {
       const changeEl = document.getElementById('sh-change');
       if (priceEl) { priceEl.textContent = '$' + cur.p.toFixed(cur.p < 10 ? 3 : 2); priceEl.className = 'sh-price ' + (cur.c >= 0 ? 'up' : 'dn'); }
       if (changeEl) { changeEl.textContent = (cur.c >= 0 ? '+' : '') + cur.c.toFixed(2) + '%'; changeEl.className = 'sh-change ' + (cur.c >= 0 ? 'up' : 'dn'); }
-      // Keep bottom-left price in sync too
+      // Keep bottom-left price in sync
       const rpPrice = document.getElementById('rp-live-price');
       if (rpPrice) { rpPrice.textContent = '$' + cur.p.toFixed(cur.p < 10 ? 3 : 2); rpPrice.className = 'qps-price ' + (cur.c >= 0 ? 'up' : 'dn'); }
+      // Also sync the open/high/low bottom-left stats
+      if (cur._open) {
+        const openEl = document.querySelector('.qps-stat-v');
+        // We re-render the whole panel every 10s via refreshQuotes — no need to do it here
+      }
     }
     // Update index bar
     ['SPY','QQQ','DIA'].forEach(t => {

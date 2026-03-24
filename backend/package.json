@@ -1,0 +1,9 @@
+{
+  "name": "oracle-prime",
+  "version": "2.0.0",
+  "description": "Oracle Prime Trading Terminal — Real market data backend",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  }
+}

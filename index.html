@@ -2427,18 +2427,34 @@ function renderRightPanel() {
 
   if(tab === 'quotes') {
     const gn = grahamNum(s.eps, s.bv);
+    // Use real fetched OHLV data if available, else compute from price
+    const open      = s._open     || s.p * (1 - Math.abs(s.c) / 200);
+    const high      = s._high     || s.p * 1.005;
+    const low       = s._low      || s.p * 0.995;
+    const prevClose = s._open     || s.p / (1 + s.c / 100);
+    const vol       = s._vol      || '—';
+    const mktCap    = s._mktCap   || '—';
     el.innerHTML = `
       <div class="quotes-price-section">
         <div class="qps-ticker">${s.t} &bull; ${s.sec}</div>
-        <div class="qps-price ${s.c>=0?'up':'dn'}" style="font-size:24px;margin-top:4px">$${s.p.toFixed(2)}</div>
+        <div class="qps-price ${s.c>=0?'up':'dn'}" style="font-size:24px;margin-top:4px" id="rp-live-price">$${s.p.toFixed(2)}</div>
         <div class="qps-change" style="margin-top:4px">
           <span class="${s.c>=0?'up':'dn'}" style="font-family:'JetBrains Mono',monospace;font-size:12px">${s.c>=0?'+':''}${s.c.toFixed(2)}%</span>
           <span style="font-size:10px;color:var(--t3)">Today</span>
         </div>
       </div>
       <div class="qps-ohlcv">
-        ${[['Open',s.p*(1-Math.random()*.01).toFixed(2)],['High',s.p*(1+Math.random()*.015).toFixed(2)],['Low',s.p*(1-Math.random()*.015).toFixed(2)],['Prev Close',s.p*(1-s.c/100).toFixed(2)],['Volume',(Math.floor(Math.random()*80+5))+'M'],['Mkt Cap',s.p>500?((s.p*Math.random()*10+5).toFixed(0)+'B'):((s.p*Math.random()*5+1).toFixed(1)+'B')],['P/E',s.pe||'N/A'],['Graham #',gn?'$'+gn.toFixed(2):'N/A']].map(([l,v])=>`
-          <div class="qps-stat"><div class="qps-stat-l">${l}</div><div class="qps-stat-v ${l==='High'?'up':l==='Low'?'dn':''}">${v}</div></div>
+        ${[
+          ['Open',    '$' + open.toFixed(2)],
+          ['High',    '$' + high.toFixed(2),  'up'],
+          ['Low',     '$' + low.toFixed(2),   'dn'],
+          ['Prev Close', '$' + prevClose.toFixed(2)],
+          ['Volume',  vol],
+          ['Mkt Cap', mktCap],
+          ['P/E',     s.pe ? s.pe.toFixed(1) : 'N/A'],
+          ['Graham #',gn   ? '$' + gn.toFixed(2) : 'N/A'],
+        ].map(([l,v,cls])=>`
+          <div class="qps-stat"><div class="qps-stat-l">${l}</div><div class="qps-stat-v ${cls||''}">${v}</div></div>
         `).join('')}
       </div>`;
   } else if(tab === 'orderbook') {
@@ -4167,18 +4183,14 @@ async function selectStockWithMassive(ticker) {  // keeping fn name for compatib
   if(!s) { showToast('Symbol not found: '+ticker,'error'); return; }
   APP.selectedTicker = ticker;
 
-  // Show current known data immediately (no random generation)
+  // Show placeholder immediately so chart is never blank
   updateStockHeader(s, null);
-  // Only regenerate candles if switching to a new ticker (not re-loading same)
-  if (APP._lastCandleTicker !== ticker || !chartData.length) {
-    chartData = []; // Clear so chart shows loading state
-  }
+  chartData = genCandles(s, APP.interval, 300);
   chartOffset = 0; renderChart();
   renderWatchlist(); renderRightPanel();
   document.getElementById('tradeSymbol').value = ticker;
   document.getElementById('tradePrice').value  = s.p.toFixed(2);
   updateTradeEstimate(); renderKelly(); renderGraham();
-  APP._lastCandleTicker = ticker;
 
   // Subscribe this ticker to WS
   if(fhSocketReady) fhSubscribe([ticker]);
@@ -4195,7 +4207,7 @@ async function selectStockWithMassive(ticker) {  // keeping fn name for compatib
     fhFetchMetrics(ticker)
   ]);
 
-  // Apply real quote — update all price displays
+  // Apply real quote — update ALL price displays including right panel
   if(quote.status === 'fulfilled' && quote.value) {
     const q = quote.value;
     s.p      = q.price     || s.p;
@@ -4207,33 +4219,40 @@ async function selectStockWithMassive(ticker) {  // keeping fn name for compatib
     const tradePriceEl = document.getElementById('tradePrice');
     if(tradePriceEl) tradePriceEl.value = s.p.toFixed(2);
     updateTradeEstimate();
-    // Update the right-panel bottom price display
-    const rpPrice = document.querySelector('.qps-price');
-    if(rpPrice) { rpPrice.textContent = '$' + s.p.toFixed(2); rpPrice.className = 'qps-price ' + (s.c >= 0 ? 'up' : 'dn'); }
+    // Re-render right panel with real price (fixes bottom-left stale price)
+    renderRightPanel();
+    renderWatchlist();
   }
 
   // Apply real candles
   if(candles.status === 'fulfilled' && candles.value && candles.value.length >= 5) {
     chartData  = candles.value;
     chartOffset = 0;
+    // Store latest volume from last candle
+    const lastBar = chartData[chartData.length - 1];
+    if(lastBar && lastBar.v) {
+      const vM = lastBar.v / 1e6;
+      s._vol = vM >= 1 ? vM.toFixed(1) + 'M' : (lastBar.v / 1e3).toFixed(0) + 'K';
+    }
     renderChart();
     renderSignalStrip();
-    showToast('Live candles — ' + ticker + ' (' + candles.value.length + ' bars)','success');
-  } else if (!chartData.length) {
-    // Fallback: generate placeholder only if nothing loaded
-    chartData = genCandles(s, APP.interval, 300);
-    chartOffset = 0;
-    renderChart();
+    renderRightPanel(); // refresh with real volume
   }
+  // placeholder already rendered above — no fallback needed
 
-  // Apply fundamentals → update Graham score
+  // Apply fundamentals → update Graham score + store for right panel
   if(metrics.status === 'fulfilled' && metrics.value) {
     const m = metrics.value;
-    if(m.eps  !== null) s.eps = m.eps;
-    if(m.bvps !== null) s.bv  = m.bvps;
-    if(m.pe   !== null) s.pe  = m.pe;
-    if(m.pb   !== null) s.pb  = m.pb;
+    if(m.eps     != null) s.eps    = m.eps;
+    if(m.bvps    != null) s.bv     = m.bvps;
+    if(m.pe      != null) s.pe     = m.pe;
+    if(m.pb      != null) s.pb     = m.pb;
+    if(m.marketCap) {
+      const mc = m.marketCap;
+      s._mktCap = mc > 1000 ? (mc/1000).toFixed(1)+'T' : mc.toFixed(0)+'B';
+    }
     renderKelly(); renderGraham();
+    renderRightPanel(); // refresh quotes tab with real fundamentals
   }
 
   // Update topbar
@@ -4572,6 +4591,15 @@ function startLivePricesEnhanced() {
     }
     renderWatchlist();
     updateBalanceDisplay();
+    // If quotes tab is visible, update the bottom-left price live
+    if(APP.activeRP === 'quotes') {
+      const rpPrice = document.getElementById('rp-live-price');
+      const cur2 = getStock(APP.selectedTicker);
+      if(rpPrice && cur2) {
+        rpPrice.textContent = '$' + cur2.p.toFixed(2);
+        rpPrice.className = 'qps-price ' + (cur2.c >= 0 ? 'up' : 'dn');
+      }
+    }
   }
 
   // Run immediately, then every 15 seconds

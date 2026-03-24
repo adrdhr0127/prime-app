@@ -1227,7 +1227,6 @@ const RAW = [
   ['PH','Parker Hannifin',657.2,0.4,'Industrials',25,26.29,null],
   ['AWK','American Water Works',135.2,-0.2,'Utilities',28,4.83,null],
   ['DUK','Duke Energy',103.2,-0.1,'Utilities',20,5.16,null],
-  ['NEE','NextEra Energy',78.5,-0.2,'Utilities',22,3.57,null],
   ['SO','Southern Company',88.4,-0.15,'Utilities',22,4.02,null],
   ['DHR','Danaher',244.5,0.3,'Life Sciences',36,6.79,null],
   ['TMO','Thermo Fisher',571.4,0.4,'Life Sciences',32,17.85,null],
@@ -1652,6 +1651,8 @@ function calcPrediction(arr, lookback=30, forward=12) {
 /* ════════════════════════════════════════════════
    OHLCV DATA GENERATOR
 ════════════════════════════════════════════════ */
+if(!window.CANDLE_CACHE) window.CANDLE_CACHE = {};
+const CANDLE_CACHE = window.CANDLE_CACHE;
 function genCandles(stock, tf, count) {
   const key = stock.t+'_'+tf;
   if(CANDLE_CACHE[key] && CANDLE_CACHE[key].length >= count) return CANDLE_CACHE[key].slice(-count);
@@ -1685,7 +1686,7 @@ function genCandles(stock, tf, count) {
   CANDLE_CACHE[key] = candles;
   return candles;
 }
-const CANDLE_CACHE = {};
+// CANDLE_CACHE declared before genCandles above
 
 /* ════════════════════════════════════════════════
    APP STATE
@@ -1710,16 +1711,27 @@ const APP = {
     balance: 100000,
     positions: {},
     orders: [],
-    history: []
-  }
+    history: [],
+    equity: []
+  },
+  aiOverlay: {}
 };
 
 // Load paper trading state
 (function loadPaper() {
-  try { const d=JSON.parse(sessionStorage.getItem('op-paper')||'{}'); if(d.balance!==undefined) Object.assign(APP.paper,d); } catch(e){}
+  try {
+    const raw = localStorage.getItem('op-paper');
+    if (raw) {
+      const d = JSON.parse(raw);
+      if (d && d.balance !== undefined) {
+        Object.assign(APP.paper, d);
+        if (!Array.isArray(APP.paper.equity)) APP.paper.equity = [];
+      }
+    }
+  } catch(e) {}
 })();
 
-function savePaper() { try { sessionStorage.setItem('op-paper',JSON.stringify(APP.paper)); } catch(e){} }
+function savePaper() { try { localStorage.setItem('op-paper',JSON.stringify(APP.paper)); } catch(e){} }
 
 /* ════════════════════════════════════════════════
    CANVAS CHART ENGINE
@@ -2431,12 +2443,13 @@ function renderRightPanel() {
   if(tab === 'quotes') {
     const gn = grahamNum(s.eps, s.bv);
     // Use real fetched OHLV data if available, else compute from price
-    const open      = s._open     || s.p * (1 - Math.abs(s.c) / 200);
-    const high      = s._high     || s.p * 1.005;
-    const low       = s._low      || s.p * 0.995;
-    const prevClose = s._open     || s.p / (1 + s.c / 100);
-    const vol       = s._vol      || '—';
-    const mktCap    = s._mktCap   || '—';
+    // Use only real data — never calculate fake values
+    const open      = s._open  || null;
+    const high      = s._high  || null;
+    const low       = s._low   || null;
+    const prevClose = s._open  || (s.p && s.c != null ? s.p / (1 + s.c / 100) : null);
+    const vol       = s._vol   || '—';
+    const mktCap    = s._mktCap|| '—';
     el.innerHTML = `
       <div class="quotes-price-section">
         <div class="qps-ticker">${s.t} &bull; ${s.sec}</div>
@@ -2448,10 +2461,10 @@ function renderRightPanel() {
       </div>
       <div class="qps-ohlcv">
         ${[
-          ['Open',    '$' + open.toFixed(2)],
-          ['High',    '$' + high.toFixed(2),  'up'],
-          ['Low',     '$' + low.toFixed(2),   'dn'],
-          ['Prev Close', '$' + prevClose.toFixed(2)],
+          ['Open',    open != null ? '$'+open.toFixed(2) : '—'],
+          ['High',    high != null ? '$'+high.toFixed(2) : '—',  'up'],
+          ['Low',     low  != null ? '$'+low.toFixed(2)  : '—',  'dn'],
+          ['Prev Close', prevClose != null ? '$'+prevClose.toFixed(2) : '—'],
           ['Volume',  vol],
           ['Mkt Cap', mktCap],
           ['P/E',     s.pe ? s.pe.toFixed(1) : 'N/A'],
@@ -2694,38 +2707,8 @@ document.querySelector('.timeframe-bar').addEventListener('click', e => {
 const NEWS_CACHE = {};
 const NEWS_TTL = 5 * 60 * 1000; // 5 minutes
 
-async function loadNews() {
-  const el = document.getElementById('newsGrid');
-  const t = APP.selectedTicker;
-  const s = getStock(t);
-  if(!s) return;
-
-  // Serve from cache if fresh
-  if(NEWS_CACHE[t] && Date.now() - NEWS_CACHE[t].ts < NEWS_TTL) {
-    renderNewsItems(el, NEWS_CACHE[t].items);
-    return;
-  }
-
-  el.innerHTML = '<div class="news-loading"><span class="spin"></span> Loading news...</div>';
-  try {
-    // Short, efficient prompt — web_search tool handles the actual searching
-    const r = await callAPI('Search news for ' + t + ' stock today. Return JSON array only, no markdown:\n[{"title":"...","summary":"...","source":"...","time":"...","sentiment":"positive|negative|neutral"}]\nMax 6 items. Keep summaries under 15 words.', 600);
-    let items = [];
-    try {
-      // Strip any markdown fences before parsing
-      const clean = r.replace(/```json|```/g,'').trim();
-      items = JSON.parse(clean);
-    } catch(e) { items = generateFallbackNews(s); }
-    NEWS_CACHE[t] = {items, ts: Date.now()};
-    renderNewsItems(el, items);
-  } catch(e) {
-    const noKey = !getApiKey();
-    el.innerHTML = '<div class="news-loading" style="color:var(--dn);padding:16px;line-height:1.9;">' +
-      (noKey ? 'No API key.<br>Open <b>Settings ⚙</b> → Anthropic API Key.<br><small style="color:var(--t3)">Get one at console.anthropic.com</small>'
-             : 'Rate limited or error.<br><small style="color:var(--t3)">'+escHtml(e.message.slice(0,120))+'</small><br><br>Try again in a minute.') +
-      '</div>';
-  }
-}
+// loadNews is an alias — real logic in loadNewsMassive
+async function loadNews() { return loadNewsMassive(); }
 
 function renderNewsItems(el, items) {
   if(!items || !items.length) { el.innerHTML='<div class="news-loading">No news found.</div>'; return; }
@@ -2893,19 +2876,7 @@ function renderGraham() {
 /* ════════════════════════════════════════════════
    PAPER TRADING
 ════════════════════════════════════════════════ */
-function updateTradeEstimate() {
-  const ticker=(document.getElementById('tradeSymbol')?.value||'').trim().toUpperCase();
-  const shares=parseFloat(document.getElementById('tradeShares')?.value||'0');
-  const price=parseFloat(document.getElementById('tradePrice')?.value||'0');
-  const s=getStock(ticker)||getStock(APP.selectedTicker);
-  if(s) document.getElementById('tradePrice').value=s.p.toFixed(2);
-  if(shares>0&&price>0) {
-    document.getElementById('tradeEstimate').textContent='Est. cost: $'+(shares*price).toFixed(2);
-    const kP=Math.min(0.82,Math.max(0.3,0.5+(s?.c||0)*0.04));
-    const kF=kellyF(kP,2.5);
-    document.getElementById('tradeKelly').textContent=(kF*100).toFixed(1)+'% of portfolio';
-  }
-}
+function updateTradeEstimate() { updateOEEstimate(); } // alias
 ['tradeSymbol','tradeShares','tradePrice'].forEach(id => {
   const el=document.getElementById(id);
   if(el) el.addEventListener('input', updateTradeEstimate);
@@ -3185,6 +3156,7 @@ function confirmResetAccount() {
   APP.paper.orders = [];
   APP.paper.history = [];
   APP.paper.equity = [{t:Date.now(), v:bal}];
+  localStorage.removeItem('op-paper');
   savePaper(); renderPositions(); updateBalanceDisplay();
   showToast('Paper account reset to $'+bal.toLocaleString(),'info');
 }
@@ -3507,11 +3479,19 @@ function applyColorPreset(upCol, dnCol) {
 /* ════════════════════════════════════════════════
    WATCHLIST MANAGEMENT
 ════════════════════════════════════════════════ */
-function addToWatchlistPrompt() {
-  const t=(window.prompt('Enter ticker symbol to add to watchlist:')||'').trim().toUpperCase();
+async function addToWatchlistPrompt() {
+  const t=(window.prompt('Enter ticker symbol to add to watchlist (any exchange):')||'').trim().toUpperCase();
   if(!t) return;
-  if(!getStock(t)) { showToast('Symbol not found: '+t,'error'); return; }
   if(APP.watchlist.includes(t)) { showToast(t+' already in watchlist','info'); return; }
+  // If not in local STOCKS, verify via Twelve Data before adding
+  if(!getStock(t)) {
+    showToast('Verifying '+t+'...','info');
+    const q = await fhFetchQuote(t);
+    if(!q || !q.price) { showToast('Symbol not found: '+t,'error'); return; }
+    STOCKS.push({t, n:t, p:q.price, c:parseFloat((q.changePct||0).toFixed(2)),
+      sec:'—', pe:null, eps:null, bv:null, vol:50,
+      _open:q.open, _high:q.high, _low:q.low});
+  }
   APP.watchlist.push(t); renderWatchlist(); showToast(t+' added to watchlist','success');
 }
 
@@ -4092,7 +4072,7 @@ function boot() {
   updateBalanceDisplay();
   renderPositions();
   initResponsiveChart(); // Add ResizeObserver for responsive chart
-  setTimeout(renderSignalStrip, 800); // Initial signal compute
+  // Signal strip rendered after first real candles load (see selectStockWithMassive)
   // Signal refresh every 30 seconds (uses latest candle data)
   APP._intervals.push(setInterval(renderSignalStrip, 30000));
   // Set first nav item active
@@ -4103,6 +4083,9 @@ function boot() {
 
 // On load
 window.addEventListener('load', () => { boot(); });
+window.addEventListener('beforeunload', () => {
+  APP._intervals && APP._intervals.forEach(clearInterval);
+});
 
 // Update chart on window resize
 window.addEventListener('resize',()=>{ resizeChart(); renderChart(); });
@@ -4389,13 +4372,15 @@ function updateStockHeader(s, quote) {
   chgEl.className   = 'sh-change '+(s.c>=0?'up':'dn');
 
   if(quote) {
+    const _f = v => (v != null && !isNaN(parseFloat(v))) ? '$'+parseFloat(v).toFixed(2) : '—';
+    const _chg = quote.change;
     document.getElementById('sh-ohlcv').innerHTML = [
-      ['Open',  '$'+quote.open.toFixed(2)],
-      ['High',  '$'+quote.high.toFixed(2)],
-      ['Low',   '$'+quote.low.toFixed(2)],
-      ['Prev',  '$'+quote.prevClose.toFixed(2)],
-      ['Chg',   (quote.change >= 0 ? '+' : '') + quote.change.toFixed(2)],
-    ].map(([l,v]) => `<div class="sh-stat"><div class="sh-stat-l">${l}</div><div class="sh-stat-v mono ${l==='Chg'?(quote.change>=0?'up':'dn'):''}">${v}</div></div>`).join('');
+      ['Open', _f(quote.open)],
+      ['High', _f(quote.high)],
+      ['Low',  _f(quote.low)],
+      ['Prev', _f(quote.prevClose)],
+      ['Chg',  _chg != null ? ((_chg >= 0 ? '+' : '') + parseFloat(_chg).toFixed(2)) : '—'],
+    ].map(([l,v]) => `<div class="sh-stat"><div class="sh-stat-l">${l}</div><div class="sh-stat-v mono ${l==='Chg'?(parseFloat(_chg||0)>=0?'up':'dn'):''}">${v}</div></div>`).join('');
   } else {
     document.getElementById('sh-ohlcv').innerHTML = [
       ['Open','$'+(s.p*(1-Math.random()*.008)).toFixed(2)],

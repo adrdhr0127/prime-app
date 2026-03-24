@@ -4008,6 +4008,25 @@ function boot() {
   renderWatchlist();
   selectStock('AAPL');
   startLivePrices();
+  // Extra: fetch real AAPL quote immediately and update header
+  setTimeout(async () => {
+    const q = await fhFetchQuote('AAPL');
+    if (q && q.price) {
+      const s = getStock('AAPL');
+      if (s) { s.p = q.price; s.c = parseFloat((q.changePct||0).toFixed(2)); s._open = q.open; }
+      const priceEl = document.getElementById('sh-price');
+      const changeEl = document.getElementById('sh-change');
+      if (priceEl) { priceEl.textContent = '$' + q.price.toFixed(2); priceEl.className = 'sh-price ' + (q.changePct >= 0 ? 'up' : 'dn'); }
+      if (changeEl) { changeEl.textContent = (q.changePct >= 0 ? '+' : '') + q.changePct.toFixed(2) + '%'; }
+      // Also reload real candles
+      const now = Math.floor(Date.now() / 1000);
+      const candles = await fhFetchCandles('AAPL', 'D', now - 365*86400, now);
+      if (candles && candles.length >= 5) {
+        chartData = candles; chartOffset = 0; renderChart();
+        showToast('Live data loaded — AAPL $' + q.price.toFixed(2), 'success');
+      }
+    }
+  }, 500);
   // Auto-refresh news every 5 min
   setInterval(()=>{ if(APP.activeTab==='news') loadNewsMassive(); },300000);
   // Re-subscribe watchlist to WS after connection
@@ -4204,9 +4223,6 @@ async function selectStockWithMassive(ticker) {  // keeping fn name for compatib
 
   // Subscribe this ticker to WS
   if(fhSocketReady) fhSubscribe([ticker]);
-
-  const key = getFinnhubKey();
-  // Always fetch real data
 
   // Parallel: quote + candles + metrics
   const now   = Math.floor(Date.now() / 1000);
@@ -4557,55 +4573,66 @@ async function renderSmartMoneyFinnhub() {
 
 // ── Enhanced startLivePrices with Finnhub ────────────────────────────────
 function startLivePricesEnhanced() {
-  // Connect WebSocket for real-time streaming
-  fhConnectWS();
-
-  // Batch quote refresh every 12 seconds — uses one backend call for entire watchlist
-  const batchIv = setInterval(async () => {
+  // ── Fetch real quotes immediately on startup ──────────────────────────
+  async function refreshQuotes() {
     const tickers = [...new Set([APP.selectedTicker, ...APP.watchlist])].slice(0, 25);
-    const quotes = await fetchBatchQuotes(tickers);
-    for (const [t, q] of Object.entries(quotes)) {
-      const s = getStock(t);
-      if (s && q.price) {
-        s.p = q.price;
-        s.c = parseFloat((q.changePct || 0).toFixed(2));
-        s._open = q.open;
-      }
-    }
-  }, 12000);
-  APP._intervals.push(batchIv);
-
-  // Simulation fallback for tickers not in fhListeners
-  const simIv = setInterval(() => {
-    STOCKS.forEach(s => {
-      if(!fhListeners.has(s.t)) {
-        const drift = (Math.random()-0.495)*s.p*0.0003;
-        s.p = Math.max(0.01, s.p+drift);
-        s.c = parseFloat((s.c+(Math.random()-0.5)*0.02).toFixed(2));
+    const results = await Promise.allSettled(tickers.map(t => fhFetchQuote(t)));
+    results.forEach((r, i) => {
+      if (r.status === 'fulfilled' && r.value && r.value.price) {
+        const s = getStock(tickers[i]);
+        if (s) {
+          s.p     = r.value.price;
+          s.c     = parseFloat((r.value.changePct || 0).toFixed(2));
+          s._open = r.value.open;
+          s._high = r.value.high;
+          s._low  = r.value.low;
+        }
       }
     });
-    ['SPY','QQQ','DIA'].forEach(t => {
-      const s  = getStock(t);
-      const el = document.getElementById('ti-'+t.toLowerCase());
-      if(el&&s) { el.textContent=(s.c>=0?'+':'')+s.c.toFixed(2)+'%'; el.style.color=s.c>=0?'var(--up)':'var(--dn)'; }
-    });
-    const vixEl = document.getElementById('ti-vix');
-    if(vixEl) { const v=(18+Math.random()*0.2-0.1); vixEl.textContent=v.toFixed(2); }
-    const yEl = document.getElementById('ti-10y');
-    if(yEl) { const y=(4.28+Math.random()*0.04-0.02); yEl.textContent=y.toFixed(2)+'%'; }
+    // Update displayed header for selected stock
     const cur = getStock(APP.selectedTicker);
-    if(cur) {
-      document.getElementById('sh-price').textContent = '$'+cur.p.toFixed(cur.p<10?3:2);
-      document.getElementById('sh-change').textContent= (cur.c>=0?'+':'')+cur.c.toFixed(2)+'%';
+    if (cur) {
+      const priceEl = document.getElementById('sh-price');
+      const changeEl = document.getElementById('sh-change');
+      if (priceEl) { priceEl.textContent = '$' + cur.p.toFixed(cur.p < 10 ? 3 : 2); priceEl.className = 'sh-price ' + (cur.c >= 0 ? 'up' : 'dn'); }
+      if (changeEl) { changeEl.textContent = (cur.c >= 0 ? '+' : '') + cur.c.toFixed(2) + '%'; changeEl.className = 'sh-change ' + (cur.c >= 0 ? 'up' : 'dn'); }
+      const tradePriceEl = document.getElementById('tradePrice');
+      if (tradePriceEl) tradePriceEl.value = cur.p.toFixed(2);
     }
     renderWatchlist();
-    if(APP.activeRP==='quotes'||APP.activeRP==='timesales') renderRightPanel();
     updateBalanceDisplay();
-    if(chartData.length) renderChart();
-    // Refresh signal every ~10s (every 8 ticks at 1.2s interval)
-    if(++APP._sigTick >= 8) { APP._sigTick = 0; renderSignalStrip(); }
-  }, 1200);
-  APP._intervals.push(simIv);
+  }
+
+  // Run immediately, then every 15 seconds
+  refreshQuotes();
+  const quoteIv = setInterval(refreshQuotes, 15000);
+  APP._intervals.push(quoteIv);
+
+  // ── WebSocket for real-time trade streaming ───────────────────────────
+  fhConnectWS();
+
+  // ── UI refresh timer (no price drift — real data only) ────────────────
+  const uiIv = setInterval(() => {
+    const cur = getStock(APP.selectedTicker);
+    if (cur) {
+      const priceEl = document.getElementById('sh-price');
+      const changeEl = document.getElementById('sh-change');
+      if (priceEl) priceEl.textContent = '$' + cur.p.toFixed(cur.p < 10 ? 3 : 2);
+      if (changeEl) { changeEl.textContent = (cur.c >= 0 ? '+' : '') + cur.c.toFixed(2) + '%'; changeEl.className = 'sh-change ' + (cur.c >= 0 ? 'up' : 'dn'); }
+    }
+    // Update index bar
+    ['SPY','QQQ','DIA'].forEach(t => {
+      const s  = getStock(t);
+      const el = document.getElementById('ti-' + t.toLowerCase());
+      if (el && s) { el.textContent = (s.c >= 0 ? '+' : '') + s.c.toFixed(2) + '%'; el.style.color = s.c >= 0 ? 'var(--up)' : 'var(--dn)'; }
+    });
+    renderWatchlist();
+    if (APP.activeRP === 'quotes' || APP.activeRP === 'timesales') renderRightPanel();
+    updateBalanceDisplay();
+    if (chartData.length) renderChart();
+    if (++APP._sigTick >= 8) { APP._sigTick = 0; renderSignalStrip(); }
+  }, 2000);
+  APP._intervals.push(uiIv);
 }
 
 </script>

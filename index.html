@@ -565,7 +565,7 @@ input,select,button{font-family:inherit;font-size:inherit;}
           <div class="chart-crosshair-info" id="crosshairInfo"></div>
         </div>
         <div class="timeframe-bar">
-          <span class="tf-btn active" data-tf="1m">1m</span>
+          <span class="tf-btn" data-tf="1m">1m</span>
           <span class="tf-btn" data-tf="5m">5m</span>
           <span class="tf-btn" data-tf="15m">15m</span>
           <span class="tf-btn" data-tf="30m">30m</span>
@@ -1030,39 +1030,12 @@ Click Analyze to get an AI assessment of your trades — what you did well, wher
 ════════════════════════════════════════════════ */
 const USERS = { 'oracle':'prime2024', 'admin':'oracle@prime', 'trader':'kelly1956' };
 
-function doLogin() {
-  const u = (document.getElementById('lu').value||'').trim().toLowerCase();
-  const p = document.getElementById('lp').value||'';
-  const err = document.getElementById('loginErr');
-  if (USERS[u] && USERS[u]===p) {
-    try { sessionStorage.setItem('op-auth', btoa(u+':'+Date.now())); } catch(e){}
-    document.getElementById('loginScreen').style.animation = 'fadeIn .3s ease reverse forwards';
-    setTimeout(() => {
-      document.getElementById('loginScreen').style.display = 'none';
-      document.getElementById('appShell').classList.add('visible');
-      boot();
-    }, 280);
-  } else {
-    err.classList.add('show');
-    document.querySelector('.login-card').style.animation = 'shake .35s ease';
-    setTimeout(() => { document.querySelector('.login-card').style.animation=''; err.classList.remove('show'); }, 1400);
-    document.getElementById('lp').value='';
-    document.getElementById('lp').focus();
-  }
-}
+function doLogin() { boot(); } // login removed
 
 function doLogout() {
   try { sessionStorage.removeItem('op-auth'); } catch(e){}
-  clearInterval(APP._intervals && APP._intervals.length && APP._intervals[0]);
-  APP._intervals && APP._intervals.forEach(clearInterval);
-  document.getElementById('appShell').classList.remove('visible');
-  document.getElementById('appShell').style.display = 'none';
-  const ls = document.getElementById('loginScreen');
-  ls.style.display = '';
-  ls.style.animation = '';
-  document.getElementById('lu').value = '';
-  document.getElementById('lp').value = '';
-  document.getElementById('lu').focus();
+  // No login screen — just reload the page
+  window.location.reload();
 }
 
 function checkSession() { return true; }
@@ -4008,25 +3981,7 @@ function boot() {
   renderWatchlist();
   selectStock('AAPL');
   startLivePrices();
-  // Extra: fetch real AAPL quote immediately and update header
-  setTimeout(async () => {
-    const q = await fhFetchQuote('AAPL');
-    if (q && q.price) {
-      const s = getStock('AAPL');
-      if (s) { s.p = q.price; s.c = parseFloat((q.changePct||0).toFixed(2)); s._open = q.open; }
-      const priceEl = document.getElementById('sh-price');
-      const changeEl = document.getElementById('sh-change');
-      if (priceEl) { priceEl.textContent = '$' + q.price.toFixed(2); priceEl.className = 'sh-price ' + (q.changePct >= 0 ? 'up' : 'dn'); }
-      if (changeEl) { changeEl.textContent = (q.changePct >= 0 ? '+' : '') + q.changePct.toFixed(2) + '%'; }
-      // Also reload real candles
-      const now = Math.floor(Date.now() / 1000);
-      const candles = await fhFetchCandles('AAPL', 'D', now - 365*86400, now);
-      if (candles && candles.length >= 5) {
-        chartData = candles; chartOffset = 0; renderChart();
-        showToast('Live data loaded — AAPL $' + q.price.toFixed(2), 'success');
-      }
-    }
-  }, 500);
+
   // Auto-refresh news every 5 min
   setInterval(()=>{ if(APP.activeTab==='news') loadNewsMassive(); },300000);
   // Re-subscribe watchlist to WS after connection
@@ -4212,14 +4167,18 @@ async function selectStockWithMassive(ticker) {  // keeping fn name for compatib
   if(!s) { showToast('Symbol not found: '+ticker,'error'); return; }
   APP.selectedTicker = ticker;
 
-  // Render immediately with local data (instant UX)
+  // Show current known data immediately (no random generation)
   updateStockHeader(s, null);
-  chartData  = genCandles(s, APP.interval, 300);
+  // Only regenerate candles if switching to a new ticker (not re-loading same)
+  if (APP._lastCandleTicker !== ticker || !chartData.length) {
+    chartData = []; // Clear so chart shows loading state
+  }
   chartOffset = 0; renderChart();
   renderWatchlist(); renderRightPanel();
   document.getElementById('tradeSymbol').value = ticker;
   document.getElementById('tradePrice').value  = s.p.toFixed(2);
   updateTradeEstimate(); renderKelly(); renderGraham();
+  APP._lastCandleTicker = ticker;
 
   // Subscribe this ticker to WS
   if(fhSocketReady) fhSubscribe([ticker]);
@@ -4236,15 +4195,21 @@ async function selectStockWithMassive(ticker) {  // keeping fn name for compatib
     fhFetchMetrics(ticker)
   ]);
 
-  // Apply quote
+  // Apply real quote — update all price displays
   if(quote.status === 'fulfilled' && quote.value) {
     const q = quote.value;
-    s.p = q.price || s.p;
-    s.c = parseFloat((q.changePct || 0).toFixed(2));
-    s._open = q.open;
+    s.p      = q.price     || s.p;
+    s.c      = parseFloat((q.changePct || 0).toFixed(2));
+    s._open  = q.open;
+    s._high  = q.high;
+    s._low   = q.low;
     updateStockHeader(s, q);
-    document.getElementById('tradePrice').value = s.p.toFixed(2);
+    const tradePriceEl = document.getElementById('tradePrice');
+    if(tradePriceEl) tradePriceEl.value = s.p.toFixed(2);
     updateTradeEstimate();
+    // Update the right-panel bottom price display
+    const rpPrice = document.querySelector('.qps-price');
+    if(rpPrice) { rpPrice.textContent = '$' + s.p.toFixed(2); rpPrice.className = 'qps-price ' + (s.c >= 0 ? 'up' : 'dn'); }
   }
 
   // Apply real candles
@@ -4252,7 +4217,13 @@ async function selectStockWithMassive(ticker) {  // keeping fn name for compatib
     chartData  = candles.value;
     chartOffset = 0;
     renderChart();
-    showToast('Live candles loaded from Finnhub','success');
+    renderSignalStrip();
+    showToast('Live candles — ' + ticker + ' (' + candles.value.length + ' bars)','success');
+  } else if (!chartData.length) {
+    // Fallback: generate placeholder only if nothing loaded
+    chartData = genCandles(s, APP.interval, 300);
+    chartOffset = 0;
+    renderChart();
   }
 
   // Apply fundamentals → update Graham score
